@@ -15,6 +15,7 @@ from strategies.missed_opportunity_analyzer import MissedOpportunityAnalyzer
 from strategies.tools import (
     VolatilityScanner, PriceVelocity, VolumeProfile, OrderBookPressure, SessionTracker,
     RSIAnalyzer, MACDSignal, BollingerBands, SupportResistance, CandlePatterns,
+    MarketRegimeDetector, ATRTracker, MultiTimeframeConfirmer, SessionTimeFilter,
 )
 import sys
 
@@ -302,11 +303,15 @@ class TradingEngine:
                     current_price = prices[symbol]
                     hold_secs = (datetime.now() - pos["entry_time"]).seconds
                     entry = pos["entry_price"]
-                    
+
                     if pos["side"] == "LONG":
                         pnl_pct = (current_price - entry) / entry
                     else:
                         pnl_pct = (entry - current_price) / entry
+
+                    # Per-position dynamic SL/TP (set at entry from ATR, fallback to config)
+                    sl_pct = pos.get("dynamic_sl", config.EARLY_STOP_LOSS_PCT)
+                    tp_pct = pos.get("dynamic_tp", config.TAKE_PROFIT_PCT)
 
                     # Update peak PnL for trailing stop
                     if pnl_pct > pos["peak_pnl_pct"]:
@@ -315,8 +320,33 @@ class TradingEngine:
                             pos["trailing_active"] = True
                             logger.info(f"🔔 Trailing stop ACTIVATED for {symbol} (peak: {pnl_pct*100:+.3f}%)")
 
+                    # ── v6: PYRAMID INTO WINNERS ──────────────────────────────
+                    # At 50% of TP reached and signals still strong → add to position
+                    pyramid_count = pos.get("pyramid_count", 0)
+                    if (pnl_pct >= tp_pct * 0.5 and pyramid_count < 2
+                            and self.simulator.balance_inr > 10_000):
+                        # Quick signal check (no LLM needed here)
+                        hist = list(self.price_history.get(symbol, []))
+                        if len(hist) >= 30:
+                            rsi_q = RSIAnalyzer.analyze(hist)
+                            macd_q = MACDSignal.analyze(hist)
+                            bb_q   = BollingerBands.analyze(hist, current_price)
+                            sr_q   = SupportResistance.analyze(hist, current_price)
+                            cp_q   = CandlePatterns.analyze(hist)
+                            b_cnt, s_cnt = self._count_pro_signals(rsi_q, macd_q, bb_q, sr_q, cp_q)
+                            signal_agrees = (pos["side"] == "LONG" and b_cnt >= 3) or \
+                                            (pos["side"] == "SHORT" and s_cnt >= 3)
+                            if signal_agrees:
+                                add_inr = int(pos.get("original_pos_inr", 10_000) * 0.5)
+                                add_inr = min(add_inr, int(self.simulator.balance_inr * 0.15))
+                                if add_inr >= 5_000:
+                                    self.simulator.enter_position(symbol, current_price, add_inr,
+                                                                   f"🔺 Pyramid #{pyramid_count+1}", side=pos["side"])
+                                    pos["pyramid_count"] = pyramid_count + 1
+                                    logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ₹{add_inr:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
+
                     # ── TAKE PROFIT ──
-                    if pnl_pct >= config.TAKE_PROFIT_PCT:
+                    if pnl_pct >= tp_pct:
                         await self._close_trade(symbol, current_price, f"✅ Take-Profit ({pnl_pct*100:+.3f}%)")
                         continue
 
@@ -328,19 +358,19 @@ class TradingEngine:
                             continue
 
                     # ── EARLY STOP-LOSS ──
-                    if pnl_pct < -config.EARLY_STOP_LOSS_PCT:
+                    if pnl_pct < -sl_pct:
                         await self._close_trade(symbol, current_price, f"⛔ Stop-Loss ({pnl_pct*100:.3f}%)")
                         continue
-                    
+
                     # ── TIME EXIT ──
                     if hold_secs >= config.MANDATORY_EXIT_SECONDS:
                         await self._close_trade(symbol, current_price, f"⏰ Time Exit ({config.MANDATORY_EXIT_SECONDS}s)")
                         continue
-                    
+
                     remaining = config.MANDATORY_EXIT_SECONDS - hold_secs
                     trailing_label = " | 🔔 TRAILING" if pos["trailing_active"] else ""
                     update_intent(
-                        f"Holding {pos['side']} {symbol} | PnL: {pnl_pct*100:+.3f}% | {remaining}s left{trailing_label}",
+                        f"Holding {pos['side']} {symbol} | PnL: {pnl_pct*100:+.3f}% (SL:{sl_pct*100:.2f}%/TP:{tp_pct*100:.2f}%) | {remaining}s{trailing_label}",
                         [symbol]
                     )
 
@@ -365,6 +395,11 @@ class TradingEngine:
                                 update_intent(f"⏳ Market dead (vol: {vol_result['volatility_pct']:.4f}%). Skipped {self.skipped_cycles}x", [symbol])
                             continue
 
+                        # ── v6: SESSION TIME FILTER ────────────────────────
+                        session_filt = SessionTimeFilter.analyze()
+                        min_pro_needed = session_filt["min_pro_signals"]
+                        conf_multiplier = session_filt["confidence_multiplier"]
+
                         # ── RUN PRO TA TOOLS ───────────────────────────────
                         rsi_result    = RSIAnalyzer.analyze(history)
                         macd_result   = MACDSignal.analyze(history)
@@ -376,20 +411,50 @@ class TradingEngine:
                             rsi_result, macd_result, bb_result, sr_result, candle_result
                         )
 
-                        # ── OPPORTUNITY PRE-FILTER (require 2+ pro signals) ─
-                        if buy_count < 2 and sell_count < 2:
+                        # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
+                        if buy_count < min_pro_needed and sell_count < min_pro_needed:
                             self.skipped_cycles += 1
                             best = max(buy_count, sell_count)
                             if self.skipped_cycles % 6 == 1:
                                 update_intent(
-                                    f"⏳ Waiting for setup ({best}/2 pro signals). RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
+                                    f"⏳ Waiting for setup ({best}/{min_pro_needed} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
                                     [symbol]
                                 )
-                            # Save as SKIPPED (low-signal, not worth recording every cycle - sample every 3rd)
                             if self.skipped_cycles % 3 == 0:
                                 save_signal_event(symbol, current_price, buy_count, sell_count,
                                                   rsi_result['rsi'], macd_result['crossover'],
                                                   bb_result['position_pct'], 'SKIPPED')
+                            continue
+
+                        proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
+
+                        # ── v6: MARKET REGIME FILTER ───────────────────────
+                        regime_result = MarketRegimeDetector.analyze(history)
+                        regime = regime_result["regime"]
+                        allowed_dir   = regime_result["trade_direction"]
+
+                        if regime == "CHOPPY":
+                            update_intent(f"🌊 CHOPPY regime — skipping signal. {regime_result['verdict']}", [symbol])
+                            continue
+
+                        if allowed_dir not in ("ANY", proposed_dir):
+                            update_intent(
+                                f"🚫 Regime MISMATCH: {proposed_dir} rejected in {regime} market. {regime_result['verdict']}",
+                                [symbol]
+                            )
+                            continue
+
+                        # ── v6: ATR-BASED DYNAMIC STOPS ────────────────────
+                        atr_result = ATRTracker.analyze(history)
+                        dynamic_sl  = atr_result["stop_loss_pct"]
+                        dynamic_tp  = atr_result["take_profit_pct"]
+
+                        # ── v6: MULTI-TIMEFRAME CONFIRMATION ───────────────
+                        mtf_result = MultiTimeframeConfirmer.analyze(history, proposed_dir)
+                        if not mtf_result["confirms"] and mtf_result["htf_trend"] != "UNKNOWN":
+                            update_intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
+                            # Soft reject: add to miss count but don't hard-block
+                            self.skipped_cycles += 1
                             continue
 
                         # ── LLM THROTTLE ───────────────────────────────────
@@ -397,28 +462,26 @@ class TradingEngine:
                         if self.last_llm_call and (now - self.last_llm_call).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
                             wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
                             if self.skipped_cycles % 2 == 0:
-                                direction = "BUY" if buy_count >= sell_count else "SELL"
                                 update_intent(
-                                    f"⚡ SETUP FOUND: {direction} ({buy_count if direction=='BUY' else sell_count}/5 signals). LLM in {wait_left}s...",
+                                    f"⚡ SETUP: {proposed_dir} ({buy_count if proposed_dir=='LONG' else sell_count}/5) | {regime} | LLM in {wait_left}s...",
                                     [symbol]
                                 )
                             continue
 
-                        # ── DIRECTION BLOCK (Claude Rule 1: no same-direction trades after 2 consecutive losses) ─
+                        # ── DIRECTION BLOCK ─────────────────────────────────
                         block = self.direction_block.get(symbol)
-                        proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
                         if block and block["side"] == proposed_dir and now < block["blocked_until"]:
                             remaining_block = int((block["blocked_until"] - now).total_seconds())
-                            update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s remaining after consecutive losses)", [symbol])
+                            update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
                             continue
 
-                        # ── DUPLICATE ENTRY GUARD (Claude Rule 3: don't re-enter within ₹500 of a recent failed price) ─
+                        # ── DUPLICATE ENTRY GUARD ────────────────────────────
                         last_entry = self.last_entry_prices.get(symbol)
                         if last_entry:
                             last_price, last_side, last_time = last_entry
                             time_since = (now - last_time).total_seconds()
                             if time_since < 300 and last_side == proposed_dir and abs(current_price - last_price) < 500:
-                                update_intent(f"⏸ Duplicate entry blocked: {proposed_dir} @ ₹{current_price:,.0f} too close to last entry @ ₹{last_price:,.0f} ({int(time_since)}s ago)", [symbol])
+                                update_intent(f"⏸ Duplicate blocked: {proposed_dir} @ ₹{current_price:,.0f} near last @ ₹{last_price:,.0f}", [symbol])
                                 continue
 
                         # ── ALL TOOLS FOR CLAUDE ────────────────────────────
@@ -427,6 +490,14 @@ class TradingEngine:
                         session_stats = self.session_tracker.get_stats()
 
                         tool_outputs = [
+                            {"name": "Market Regime",
+                             "data": f"{regime_result['verdict']} (strength: {regime_result['strength']})"},
+                            {"name": "ATR Tracker",
+                             "data": atr_result['verdict']},
+                            {"name": "Multi-Timeframe",
+                             "data": mtf_result['verdict']},
+                            {"name": "Session Filter",
+                             "data": session_filt['verdict']},
                             {"name": "Volatility Scanner",
                              "data": f"Vol: {vol_result['volatility_pct']:.4f}% — {vol_result['verdict']}"},
                             {"name": "Price Velocity",
@@ -435,60 +506,57 @@ class TradingEngine:
                              "data": f"24h Vol: {vol_prof['volume_24h']} | Spread: {vol_prof['spread_pct']:.4f}% — {vol_prof['verdict']}"},
                             {"name": "Order Book Pressure",
                              "data": f"{ob_result['pressure']} (bias: {ob_result['bias']:+.4f}%)"},
-                            # ── PRO TOOLS ──
                             {"name": "RSI (14)",
-                             "data": f"{rsi_result['verdict']}", "signal": rsi_result["signal"]},
-                            {"name": "MACD (12,26,9)",
-                             "data": f"{macd_result['verdict']}", "signal": macd_result["crossover"]},
-                            {"name": "Bollinger Bands (20,2)",
-                             "data": f"{bb_result['verdict']}", "signal": bb_result["signal"]},
+                             "data": rsi_result['verdict'], "signal": rsi_result["signal"]},
+                            {"name": "MACD Signal",
+                             "data": macd_result['verdict'], "signal": macd_result["crossover"]},
+                            {"name": "Bollinger Bands",
+                             "data": bb_result['verdict'], "signal": bb_result["signal"]},
                             {"name": "Support & Resistance",
-                             "data": f"{sr_result['verdict']}", "signal": sr_result.get("signal", "NEUTRAL")},
+                             "data": sr_result['verdict'], "signal": sr_result.get("signal", "NEUTRAL")},
                             {"name": "Candle Patterns",
-                             "data": f"{candle_result['verdict']}", "signal": candle_result["signal"]},
-                            # ── ALGO & SESSION ──
+                             "data": candle_result['verdict'], "signal": candle_result["signal"]},
                         ]
                         for agent in self.algo_agents:
                             sig = agent.analyze(symbol, current_price, history, meta)
-                            tool_outputs.append({
-                                "name": agent.name,
-                                "data": f"{sig.action} (conf: {sig.confidence:.2f}) — {sig.reason}",
-                            })
+                            tool_outputs.append({"name": agent.name,
+                                                 "data": f"{sig.action} (conf: {sig.confidence:.2f}) — {sig.reason}"})
                         trend_sig = self.trend_filter.analyze(symbol, current_price, history, meta)
-                        tool_outputs.append({
-                            "name": "Trend Filter",
-                            "data": f"{trend_sig.action} (multiplier: {trend_sig.confidence:.1f}) — {trend_sig.reason}",
-                        })
-                        tool_outputs.append({
-                            "name": "Session Performance",
-                            "data": f"Trades: {session_stats['total_trades']} | WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | PnL: ₹{session_stats['cumulative_pnl']} — {session_stats['recommendation']}",
-                        })
+                        tool_outputs.append({"name": "Trend Filter",
+                                             "data": f"{trend_sig.action} — {trend_sig.reason}"})
+                        tool_outputs.append({"name": "Session Performance",
+                                             "data": f"WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | PnL: ₹{session_stats['cumulative_pnl']} — {session_stats['recommendation']}"})
 
                         # ── CLAUDE MAKES THE FINAL CALL ──────────────────
                         self.last_llm_call = now
-                        direction = "BUY" if buy_count >= sell_count else "SELL"
-                        logger.info(f"⚡ SETUP: {direction} ({buy_count}B/{sell_count}S) | RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}% | Sending to Claude...")
-                        
+                        logger.info(f"⚡ SETUP: {proposed_dir} ({buy_count}B/{sell_count}S) | {regime} | {session_filt['session']} | ATR-SL:{dynamic_sl*100:.2f}% TP:{dynamic_tp*100:.2f}% | Sending to Claude...")
+
                         if self.llm_agent:
                             llm_signal = self.llm_agent.analyze_with_tools(
-                                symbol, current_price, history, meta, tool_outputs
+                                symbol, current_price, history, meta, tool_outputs,
+                                buy_count=buy_count, sell_count=sell_count,
+                                regime=regime,
+                                rsi=rsi_result['rsi'],
+                                macd=macd_result['crossover'],
+                                bb_pct=bb_result['position_pct'],
                             )
                         else:
                             continue
 
-                        if not llm_signal or llm_signal.action == "NEUTRAL" or llm_signal.confidence < config.MIN_ENSEMBLE_CONFIDENCE:
+                        # ── EFFECTIVE CONFIDENCE: session-adjusted ─────────
+                        effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
+
+                        if not llm_signal or llm_signal.action == "NEUTRAL" or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE:
                             self.skipped_cycles += 1
                             conf = llm_signal.confidence if llm_signal else 0
                             action = llm_signal.action if llm_signal else "NEUTRAL"
                             if self.skipped_cycles % 3 == 1:
-                                update_intent(f"⏳ Claude passed (conf: {conf:.2f}). Skipped {self.skipped_cycles}x", [symbol])
-                            # MISSED: strong signals present but Claude declined
+                                update_intent(f"⏳ Claude passed (raw:{conf:.2f} adj:{effective_conf:.2f}). Skipped {self.skipped_cycles}x", [symbol])
                             save_signal_event(symbol, current_price, buy_count, sell_count,
                                               rsi_result['rsi'], macd_result['crossover'],
                                               bb_result['position_pct'], 'MISSED',
                                               claude_action=action, claude_conf=conf)
                             self.missed_opportunities_count += 1
-                            # Every 5 misses, run self-critique analyzer
                             if self.missed_opportunities_count % 5 == 0 and hasattr(self, 'missed_analyzer') and self.missed_analyzer:
                                 try:
                                     logger.info(f"🔍 Running MissedOpportunityAnalyzer ({self.missed_opportunities_count} misses)...")
@@ -496,16 +564,45 @@ class TradingEngine:
                                 except Exception as e:
                                     logger.error(f"MissedOpportunityAnalyzer error: {e}")
                             continue
-                        
-                        # ── EXECUTE ─────────────────────────────────────
+
+                        # ── v6: CONFIDENCE-SCALED + KELLY POSITION SIZING ──
+                        # Base sizing: 10k-28k based on confidence; Kelly fraction reduces after losses
+                        base_conf = llm_signal.confidence
+                        if base_conf >= 0.80:
+                            pos_inr = 28_000
+                        elif base_conf >= 0.65:
+                            pos_inr = 20_000
+                        elif base_conf >= 0.50:
+                            pos_inr = 15_000
+                        else:
+                            pos_inr = 10_000
+
+                        # Kelly adjustment: shrink after losing streaks
+                        streak_info = session_stats.get('streak', '')
+                        if 'LOSS' in str(streak_info) and any(str(n) in str(streak_info) for n in ['2','3','4','5']):
+                            pos_inr = int(pos_inr * 0.7)   # 30% reduction on losing streak
+                            logger.info(f"📉 Kelly: position shrunk to ₹{pos_inr:,} (loss streak)")
+
+                        pos_inr = max(10_000, min(pos_inr, int(self.simulator.balance_inr * 0.30)))  # never > 30% balance
+
+                        # ── EXECUTE ─────────────────────────────────────────
                         side = "LONG" if llm_signal.action == "BUY" else "SHORT"
-                        reason = f"Claude({llm_signal.confidence:.2f}) | {buy_count}B/{sell_count}S | {llm_signal.reason}"
+                        reason = (f"Claude({llm_signal.confidence:.2f} adj:{effective_conf:.2f}) | "
+                                  f"{buy_count}B/{sell_count}S | {regime} | {session_filt['session']} | "
+                                  f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}% | {llm_signal.reason}")
 
                         self.trades_executed += 1
                         self.skipped_cycles = 0
-                        update_intent(f"🎯 Trade #{self.trades_executed}: {side} | {reason}", [symbol])
-                        self.simulator.enter_position(symbol, current_price, config.MAX_POSITION_SIZE_INR, reason, side=side)
-                        # Save TRADED signal event
+                        update_intent(f"🎯 Trade #{self.trades_executed}: {side} ₹{pos_inr:,} | conf:{llm_signal.confidence:.2f} | {reason}", [symbol])
+                        self.simulator.enter_position(symbol, current_price, pos_inr, reason, side=side)
+
+                        # Store dynamic stops in position for use in management
+                        if symbol in self.simulator.positions:
+                            self.simulator.positions[symbol]["dynamic_sl"] = dynamic_sl
+                            self.simulator.positions[symbol]["dynamic_tp"] = dynamic_tp
+                            self.simulator.positions[symbol]["pyramid_count"] = 0
+                            self.simulator.positions[symbol]["original_pos_inr"] = pos_inr
+
                         save_signal_event(symbol, current_price, buy_count, sell_count,
                                           rsi_result['rsi'], macd_result['crossover'],
                                           bb_result['position_pct'], 'TRADED',

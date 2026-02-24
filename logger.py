@@ -15,8 +15,8 @@ stdout_handler = logging.StreamHandler(sys.stdout)
 stdout_handler.setFormatter(formatter)
 logger.addHandler(stdout_handler)
 
-# File Handler for "Learning"
-file_handler = logging.FileHandler(f"trading_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+# File Handler (Consolidated)
+file_handler = logging.FileHandler("trading.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
