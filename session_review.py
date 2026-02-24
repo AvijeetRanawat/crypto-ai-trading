@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import boto3
 from datetime import datetime
+from typing import Optional
 from config import config
 from database import DB_PATH, save_lesson
 from logger import logger
@@ -92,7 +93,7 @@ EXISTING LESSONS (most recent 8):
 # ─────────────────────────────────────────────────────────────────────────────
 #  LLM Call
 # ─────────────────────────────────────────────────────────────────────────────
-def _call_claude(bedrock_client, report: str, is_mini: bool = False) -> dict | None:
+def _call_claude(bedrock_client, report: str, is_mini: bool = False) -> Optional[dict]:
     """Ask Claude to analyze the report and return actionable JSON."""
     depth_note = "Focus on 2-3 key observations (this is a quick mid-session check)." if is_mini else \
                  "This is an end-of-session deep-dive. Be thorough."
