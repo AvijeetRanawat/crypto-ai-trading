@@ -1,0 +1,564 @@
+:root {
+    --bg: #0d0d12;
+    --surface: rgba(255, 255, 255, 0.035);
+    --border: rgba(255, 255, 255, 0.08);
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #facc15;
+    --text: #e4e4e7;
+    --muted: #71717a;
+    --mono: 'JetBrains Mono', monospace;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.glass {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.positive {
+    color: var(--green);
+}
+
+.negative {
+    color: var(--red);
+}
+
+.neutral {
+    color: var(--text);
+}
+
+/* ── TOP BAR ── */
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.5);
+    flex-shrink: 0;
+}
+
+.topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.dot-live {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: blink 2s infinite;
+}
+
+@keyframes blink {
+    50% {
+        opacity: 0.4;
+    }
+}
+
+.brand-name {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.mode-badge {
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--accent);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 6px;
+    letter-spacing: 1px;
+}
+
+.topbar-right {
+    display: flex;
+    gap: 1.25rem;
+}
+
+.stat-pill {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.pill-label {
+    font-size: 8px;
+    color: var(--muted);
+    letter-spacing: 1px;
+    font-weight: 600;
+}
+
+.pill-value {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* ── LAYOUT ── */
+.dashboard {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.chart-area {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ── PRICE TICKER ── */
+.price-ticker {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.pair {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+.live-price {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 700;
+}
+
+.live-change {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.legend {
+    display: flex;
+    gap: 0.75rem;
+    margin-left: auto;
+}
+
+.legend-item {
+    font-size: 10px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.legend-dot.traded {
+    background: var(--accent);
+    box-shadow: 0 0 5px var(--accent);
+}
+
+.legend-dot.missed {
+    background: var(--yellow);
+    box-shadow: 0 0 5px var(--yellow);
+}
+
+/* ── CHART WRAP ── */
+.chart-wrap {
+    flex: 1;
+    padding: 0.75rem;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.chart-label-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.chart-label {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+}
+
+.card-label {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+    margin-bottom: 0.4rem;
+}
+
+.ta-badge {
+    font-family: var(--mono);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+    border: 1px solid var(--border);
+}
+
+.legend-inline {
+    font-size: 9px;
+    color: var(--muted);
+    margin-left: auto;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+#priceChart {
+    flex: 1;
+    min-height: 0;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+/* ── SIGNAL PANEL ── */
+.signal-panel {
+    padding: 0.6rem 0.75rem;
+    flex-shrink: 0;
+    height: 110px;
+    display: flex;
+    flex-direction: column;
+}
+
+.signal-panel canvas {
+    flex: 1;
+    min-height: 0;
+}
+
+/* ── BOTTOM ROW ── */
+.bottom-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+    height: 140px;
+    flex-shrink: 0;
+}
+
+.equity-card,
+.trades-card {
+    padding: 0.75rem;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+#equityChart {
+    flex: 1;
+    min-height: 0;
+}
+
+.trades-list {
+    overflow-y: auto;
+    flex: 1;
+}
+
+.trade-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    font-size: 11px;
+}
+
+.trade-row:last-child {
+    border: none;
+}
+
+.t-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.t-sym {
+    font-weight: 600;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+
+.t-side {
+    font-size: 9px;
+    color: var(--muted);
+}
+
+.t-side.buy {
+    color: var(--green);
+}
+
+.t-side.sell {
+    color: var(--red);
+}
+
+.t-pnl {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 12px;
+}
+
+/* ── AI PANEL ── */
+.ai-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.panel-section {
+    padding: 0.85rem;
+    flex-shrink: 0;
+}
+
+.section-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+    margin-bottom: 0.6rem;
+}
+
+.pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    animation: blink 1.5s infinite;
+}
+
+.intent-text {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text);
+}
+
+/* ── VOTE METERS ── */
+.signal-votes-panel {}
+
+.vote-meters {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+}
+
+.vote-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.vote-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    width: 28px;
+}
+
+.vote-bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.vote-bar {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+.buy-bar {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+
+.sell-bar {
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red);
+}
+
+.vote-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    width: 28px;
+    text-align: right;
+}
+
+.ta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+}
+
+.ta-cell {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+}
+
+.ta-name {
+    font-size: 9px;
+    color: var(--muted);
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+.ta-val {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    margin-top: 2px;
+}
+
+/* ── LESSONS ── */
+.lessons-panel {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.lessons-list {
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.lesson-box {
+    padding: 0.5rem 0.65rem;
+    border-radius: 6px;
+    border-left: 3px solid var(--accent);
+    background: rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+}
+
+.lesson-box.golden {
+    border-left-color: var(--yellow);
+}
+
+.lesson-box.risk {
+    border-left-color: var(--red);
+}
+
+.lesson-box.warning {
+    border-left-color: var(--yellow);
+}
+
+.lesson-box.self_critique {
+    border-left-color: #a855f7;
+}
+
+.l-title {
+    font-size: 9px;
+    color: var(--muted);
+    margin-bottom: 2px;
+    font-weight: 600;
+}
+
+.l-body {
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+/* ── LOGS ── */
+.logs-bar {
+    margin: 0 0.75rem 0.75rem;
+    padding: 0.6rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex-shrink: 0;
+}
+
+.logs-title {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+}
+
+.log-body {
+    background: #000;
+    color: #22c55e;
+    font-family: var(--mono);
+    font-size: 10px;
+    height: 70px;
+    overflow-y: auto;
+    border-radius: 4px;
+    padding: 0.4rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+::-webkit-scrollbar {
+    width: 3px;
+    height: 3px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+}

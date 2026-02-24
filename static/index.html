@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto AI Trading Terminal</title>
+    <link rel="stylesheet" href="style.css?v=3">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <div class="app">
+
+        <!-- TOP BAR -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <div class="dot-live"></div>
+                <span class="brand-name">AI Trading Terminal</span>
+                <span class="mode-badge">SIMULATION</span>
+            </div>
+            <div class="topbar-right">
+                <div class="stat-pill">
+                    <span class="pill-label">BALANCE</span>
+                    <span id="balance-val" class="pill-value">₹1,00,000</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">P/L</span>
+                    <span id="total-profit-val" class="pill-value neutral">+₹0.00</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">WIN RATE</span>
+                    <span id="win-rate-val" class="pill-value">--%</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">TRADES</span>
+                    <span id="trades-count-val" class="pill-value mono">0</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">MISSED OPP.</span>
+                    <span id="missed-count-val" class="pill-value" style="color: var(--yellow)">0</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">UPTIME</span>
+                    <span id="uptime-val" class="pill-value mono">00:00:00</span>
+                </div>
+            </div>
+        </header>
+
+        <main class="dashboard">
+            <!-- LEFT: Chart area -->
+            <div class="chart-area">
+
+                <!-- Price ticker -->
+                <div class="price-ticker">
+                    <span class="pair">BTC / INR</span>
+                    <span id="current-price" class="live-price">₹0.00</span>
+                    <span id="price-change" class="live-change">+0.000%</span>
+                    <div class="legend">
+                        <span class="legend-item"><span class="legend-dot traded"></span>Trade Entered</span>
+                        <span class="legend-item"><span class="legend-dot missed"></span>Missed Opportunity</span>
+                    </div>
+                </div>
+
+                <!-- Main price chart -->
+                <div class="chart-wrap glass">
+                    <div class="chart-label-row">
+                        <span class="chart-label">PRICE CHART · LIVE</span>
+                        <span id="rsi-badge" class="ta-badge">RSI —</span>
+                        <span id="macd-badge" class="ta-badge">MACD —</span>
+                        <span id="bb-badge" class="ta-badge">BB —</span>
+                    </div>
+                    <div id="priceChart"></div>
+                </div>
+
+                <!-- Signal Intelligence Panel -->
+                <div class="signal-panel glass">
+                    <div class="chart-label-row">
+                        <span class="chart-label">SIGNAL INTELLIGENCE · Tool votes per evaluation cycle</span>
+                        <span class="legend-inline">
+                            <span style="color:var(--green)">█</span> BUY votes
+                            <span style="color:var(--red)">█</span> SELL votes
+                            <span style="color:var(--yellow)">◆</span> Missed &nbsp;
+                            <span style="color:var(--accent)">▲</span> Traded
+                        </span>
+                    </div>
+                    <canvas id="signalChart"></canvas>
+                </div>
+
+                <!-- Bottom row -->
+                <div class="bottom-row">
+                    <div class="equity-card glass">
+                        <div class="card-label">EQUITY CURVE</div>
+                        <canvas id="equityChart"></canvas>
+                    </div>
+                    <div class="trades-card glass">
+                        <div class="card-label">RECENT TRADES</div>
+                        <div id="trades-list" class="trades-list"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: AI Panel -->
+            <aside class="ai-panel">
+                <div class="panel-section glass">
+                    <div class="section-header">
+                        <div class="pulse-dot"></div>
+                        <span>AI INTENT</span>
+                    </div>
+                    <div id="intent-display" class="intent-text">Initializing...</div>
+                </div>
+
+                <div class="panel-section glass signal-votes-panel">
+                    <div class="section-header">
+                        <span>📊 LIVE VOTE TALLY</span>
+                    </div>
+                    <div class="vote-meters">
+                        <div class="vote-row">
+                            <span class="vote-label">BUY</span>
+                            <div class="vote-bar-wrap">
+                                <div id="buy-bar" class="vote-bar buy-bar" style="width:0%"></div>
+                            </div>
+                            <span id="buy-count" class="vote-count positive">0/5</span>
+                        </div>
+                        <div class="vote-row">
+                            <span class="vote-label">SELL</span>
+                            <div class="vote-bar-wrap">
+                                <div id="sell-bar" class="vote-bar sell-bar" style="width:0%"></div>
+                            </div>
+                            <span id="sell-count" class="vote-count negative">0/5</span>
+                        </div>
+                    </div>
+                    <div class="ta-grid">
+                        <div class="ta-cell">
+                            <div class="ta-name">RSI</div>
+                            <div id="rsi-val" class="ta-val">—</div>
+                        </div>
+                        <div class="ta-cell">
+                            <div class="ta-name">MACD</div>
+                            <div id="macd-val" class="ta-val">—</div>
+                        </div>
+                        <div class="ta-cell">
+                            <div class="ta-name">BB%</div>
+                            <div id="bb-val" class="ta-val">—</div>
+                        </div>
+                        <div class="ta-cell">
+                            <div class="ta-name">Outcome</div>
+                            <div id="outcome-val" class="ta-val">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-section glass lessons-panel">
+                    <div class="section-header">
+                        <span>🎓 LESSONS LEARNED</span>
+                    </div>
+                    <div id="lessons-log" class="lessons-list"></div>
+                </div>
+            </aside>
+        </main>
+
+        <section class="logs-bar glass">
+            <div class="logs-title">SYSTEM LOG</div>
+            <pre id="log-terminal" class="log-body">...</pre>
+        </section>
+    </div>
+    <script src="script.js?v=3"></script>
+</body>
+
+</html>
