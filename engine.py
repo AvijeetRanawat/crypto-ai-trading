@@ -130,6 +130,8 @@ class TradingEngine:
         self.skipped_cycles = 0
         self.last_llm_call = None
         self.missed_opportunities_count = 0
+        self.last_entry_prices: dict = {}      # symbol -> (price, side, timestamp)
+        self.direction_block: dict = {}         # symbol -> {side, blocked_until}
         
         logger.info(f"Engine v5 ready. Watching: {config.BLUE_CHIP_WHITELIST}")
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
@@ -162,6 +164,33 @@ class TradingEngine:
             self.total_session_pnl += trade_result["pnl"]
             self.trades_closed += 1
             self.session_tracker.record_trade(trade_result["pnl"])
+
+            # ── Record for duplicate-entry guard ──
+            self.last_entry_prices[symbol] = (
+                trade_result["entry_price"], trade_result["side"], datetime.now()
+            )
+
+            # ── Direction block: if this is a loss, track consecutive losses per direction ──
+            if trade_result["pnl"] <= 0:
+                side = trade_result["side"]
+                block_key = f"{symbol}_{side}"
+                self._loss_streak = getattr(self, '_loss_streak', {})
+                self._loss_streak[block_key] = self._loss_streak.get(block_key, 0) + 1
+                if self._loss_streak[block_key] >= 2:
+                    block_until = datetime.now() + timedelta(seconds=600)  # 10 min block
+                    self.direction_block[symbol] = {"side": side, "blocked_until": block_until}
+                    logger.warning(f"🚫 DIRECTION BLOCK: {side} on {symbol} for 10 min after {self._loss_streak[block_key]} consecutive losses")
+                    self._loss_streak[block_key] = 0  # reset after block
+            else:
+                # Win — reset the loss streak for this symbol's direction
+                side = trade_result["side"]
+                block_key = f"{symbol}_{side}"
+                self._loss_streak = getattr(self, '_loss_streak', {})
+                self._loss_streak[block_key] = 0
+                # Clear any direction block if we just won
+                if self.direction_block.get(symbol, {}).get("side") == side:
+                    self.direction_block.pop(symbol, None)
+
             if self.retro_agent:
                 try:
                     update_intent(f"🔬 Analyzing trade #{self.trades_closed}...", [symbol])
@@ -297,6 +326,23 @@ class TradingEngine:
                                 )
                             continue
 
+                        # ── DIRECTION BLOCK (Claude Rule 1: no same-direction trades after 2 consecutive losses) ─
+                        block = self.direction_block.get(symbol)
+                        proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
+                        if block and block["side"] == proposed_dir and now < block["blocked_until"]:
+                            remaining_block = int((block["blocked_until"] - now).total_seconds())
+                            update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s remaining after consecutive losses)", [symbol])
+                            continue
+
+                        # ── DUPLICATE ENTRY GUARD (Claude Rule 3: don't re-enter within ₹500 of a recent failed price) ─
+                        last_entry = self.last_entry_prices.get(symbol)
+                        if last_entry:
+                            last_price, last_side, last_time = last_entry
+                            time_since = (now - last_time).total_seconds()
+                            if time_since < 300 and last_side == proposed_dir and abs(current_price - last_price) < 500:
+                                update_intent(f"⏸ Duplicate entry blocked: {proposed_dir} @ ₹{current_price:,.0f} too close to last entry @ ₹{last_price:,.0f} ({int(time_since)}s ago)", [symbol])
+                                continue
+
                         # ── ALL TOOLS FOR CLAUDE ────────────────────────────
                         vel_result    = PriceVelocity.analyze(history, current_price)
                         ob_result     = OrderBookPressure.analyze(meta, current_price)
@@ -393,16 +439,26 @@ class TradingEngine:
 
             await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
 
-        # ── Session Complete ─────────────────────────────────────────────
+        # ── Session Complete ─────────────────────────────────────────────────────
         logger.info(f"🏁 Session Complete! {self.trades_closed} trades.")
         logger.info(f"💰 Net PnL: ₹{self.total_session_pnl:,.2f}")
         logger.info(f"💼 Final Balance: ₹{self.simulator.balance_inr:,.2f}")
         
+        # ── 1. Meta-Optimizer (synthesises golden rules from lessons) ──
         if self.meta_optimizer:
             try:
                 self.meta_optimizer.optimize()
             except Exception as e:
                 logger.error(f"Meta-Optimizer error: {e}")
+
+        # ── 2. Full Session Post-Mortem (deep LLM analysis + auto config tuning) ──
+        try:
+            logger.info("🔬 Running session post-mortem analysis...")
+            update_intent("🔬 Session post-mortem: Claude reviewing all trades and missed opportunities...", [])
+            from session_review import run_review
+            run_review()
+        except Exception as e:
+            logger.error(f"Session post-mortem error: {e}")
         
-        update_intent(f"Done. {self.trades_closed} trades. PnL: ₹{self.total_session_pnl:,.2f}. Bal: ₹{self.simulator.balance_inr:,.2f}", [])
+        update_intent(f"Done. {self.trades_closed} trades. PnL: ₹{self.total_session_pnl:,.2f}. Run 'python3 reset_session.py' to start fresh.", [])
         sys.exit(0)

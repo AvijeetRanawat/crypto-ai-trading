@@ -14,9 +14,9 @@ class Config:
     WEIGHT_LLM = 0.4         # Claude gets the most voting power      
     
     # ── Confidence & Risk Gates ──
-    MIN_ENSEMBLE_CONFIDENCE = 0.15   # Skip cycle if max(buy,sell) < this
+    MIN_ENSEMBLE_CONFIDENCE = 0.42   # Auto-tuned by session review   # Skip cycle if max(buy,sell) < this
     ALGO_SIGNAL_THRESHOLD = 0.10     # Call Claude only if algo score > this
-    EARLY_STOP_LOSS_PCT = 0.0015     # Exit immediately if -0.15% drawdown
+    EARLY_STOP_LOSS_PCT = 0.008   # Auto-tuned by session review     # Exit immediately if -0.15% drawdown
     LLM_POLL_INTERVAL_SECONDS = 10   # Call Claude every 10s (was 30s — faster reaction)
 
     # ── Timeframes ──
@@ -27,7 +27,7 @@ class Config:
     COOLDOWN_MINUTES = 0          # Immediate re-entry
 
     # ── Dynamic Exit Strategy ──
-    TAKE_PROFIT_PCT = 0.005          # Exit at +0.5% profit (lock in gains)
+    TAKE_PROFIT_PCT = 0.018   # Auto-tuned by session review          # Exit at +0.5% profit (lock in gains)
     TRAILING_STOP_TRIGGER_PCT = 0.003  # At +0.3% profit, activate trailing stop
     TRAILING_STOP_OFFSET_PCT = 0.002   # Trail by 0.2% from peak
 
@@ -38,7 +38,7 @@ class Config:
     MAX_POSITION_SIZE_INR = 20000   # Reduced from 90k to limit downside
     MIN_POSITION_SIZE_INR = 20000   
 
-    TAKE_PROFIT_PCT = 1.0         # Ignored (exit by time instead)
+    TAKE_PROFIT_PCT = 0.018   # Auto-tuned by session review         # Ignored (exit by time instead)
     STOP_LOSS_PCT = 1.0           # Ignored (using EARLY_STOP_LOSS_PCT)
     MAX_POSITIONS = 1             
 

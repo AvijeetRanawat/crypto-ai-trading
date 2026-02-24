@@ -229,18 +229,20 @@ class SessionTracker:
 class RSIAnalyzer:
     """
     Relative Strength Index (RSI-14).
-    <30 = oversold (BUY signal), >70 = overbought (SELL signal).
-    One of the highest-reliability indicators for crypto scalping.
+    < 30 = oversold (BUY signal), > 70 = overbought (SELL signal).
+    RSI < 5 or > 95 on 1m data is flagged as SUSPECT (momentum spike artifact).
     """
     name = "RSI (14)"
     PERIOD = 14
+    MIN_HISTORY = 28  # Need 2x the period for stable Wilder smoothing
 
     @staticmethod
     def analyze(history: list) -> dict:
-        if len(history) < RSIAnalyzer.PERIOD + 1:
-            return {"rsi": 50.0, "signal": "NEUTRAL", "verdict": "Insufficient data"}
+        if len(history) < RSIAnalyzer.MIN_HISTORY:
+            return {"rsi": 50.0, "signal": "NEUTRAL", "verdict": f"Warming up ({len(history)}/{RSIAnalyzer.MIN_HISTORY} ticks)"}
 
-        prices = list(history)[-(RSIAnalyzer.PERIOD + 1):]
+        # Use last PERIOD+1 prices for the core calc, but seed with smoothed avg from longer window
+        prices = list(history)[-RSIAnalyzer.PERIOD - 1:]
         gains, losses = [], []
         for i in range(1, len(prices)):
             delta = prices[i] - prices[i - 1]
@@ -254,13 +256,26 @@ class RSIAnalyzer:
         avg_gain = statistics.mean(gains) if gains else 0
         avg_loss = statistics.mean(losses) if losses else 0
 
-        if avg_loss == 0:
-            rsi = 100.0
+        if avg_loss == 0 and avg_gain == 0:
+            rsi = 50.0  # No movement at all
+        elif avg_loss == 0:
+            rsi = 99.0  # All gains, but cap at 99 (not 100) to flag momentum spike
+        elif avg_gain == 0:
+            rsi = 1.0   # All losses, but cap at 1 (not 0)
         else:
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
 
         rsi = round(rsi, 2)
+
+        # ── SUSPECT flagging: extreme RSI on 1m data is often a momentum spike artifact ──
+        if rsi < 5 or rsi > 95:
+            return {
+                "rsi": rsi,
+                "signal": "NEUTRAL",
+                "verdict": f"RSI {rsi} — ⚠️ SUSPECT (momentum spike artifact, unreliable on 1m data). Treat as NEUTRAL.",
+                "suspect": True,
+            }
 
         if rsi < 20:
             signal = "STRONG_BUY"
@@ -284,7 +299,7 @@ class RSIAnalyzer:
             signal = "NEUTRAL"
             verdict = f"RSI {rsi} — Neutral zone, no edge"
 
-        return {"rsi": rsi, "signal": signal, "verdict": verdict}
+        return {"rsi": rsi, "signal": signal, "verdict": verdict, "suspect": False}
 
 
 class MACDSignal:
