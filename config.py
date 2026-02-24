@@ -9,44 +9,46 @@ class Config:
     TRADING_MODE = os.getenv("TRADING_MODE", "SIMULATION")
 
     # ── Ensemble Weights ──
-    WEIGHT_MOMENTUM = 0.3    
-    WEIGHT_SWING = 0.3 
-    WEIGHT_LLM = 0.4         # Claude gets the most voting power      
-    
-    # ── Confidence & Risk Gates ──
-    MIN_ENSEMBLE_CONFIDENCE = 0.42   # Auto-tuned by session review   # Skip cycle if max(buy,sell) < this
-    ALGO_SIGNAL_THRESHOLD = 0.10     # Call Claude only if algo score > this
-    EARLY_STOP_LOSS_PCT = 0.008   # Auto-tuned by session review     # Exit immediately if -0.15% drawdown
-    LLM_POLL_INTERVAL_SECONDS = 10   # Call Claude every 10s (was 30s — faster reaction)
+    WEIGHT_MOMENTUM = 0.3
+    WEIGHT_SWING = 0.3
+    WEIGHT_LLM = 0.4              # Claude gets the most voting power
 
-    # ── Timeframes ──
-    MAX_TRADES_RUN = 100           # Run for a long time
-    MANDATORY_EXIT_SECONDS = 300   # 5-min max hold (scalp timeframe)
-    CHECK_INTERVAL_SECONDS = 5    
-    POLL_INTERVAL_SECONDS = 5     
-    COOLDOWN_MINUTES = 0          # Immediate re-entry
+    # ── Confidence & Risk Gates ──
+    MIN_ENSEMBLE_CONFIDENCE = 0.42   # Auto-tuned 14:53
+    ALGO_SIGNAL_THRESHOLD = 0.10
+    EARLY_STOP_LOSS_PCT = 0.008      # Auto-tuned 14:53
+    LLM_POLL_INTERVAL_SECONDS = 10   # Call Claude every 10s
 
     # ── Dynamic Exit Strategy ──
-    TAKE_PROFIT_PCT = 0.018   # Auto-tuned by session review          # Exit at +0.5% profit (lock in gains)
+    TAKE_PROFIT_PCT = 0.018          # Auto-tuned 14:53
     TRAILING_STOP_TRIGGER_PCT = 0.003  # At +0.3% profit, activate trailing stop
     TRAILING_STOP_OFFSET_PCT = 0.002   # Trail by 0.2% from peak
 
-    # ── AWS Bedrock LLM ──
-    BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
-    
-    # ── Position Sizing (Conservative) ──
-    MAX_POSITION_SIZE_INR = 20000   # Reduced from 90k to limit downside
-    MIN_POSITION_SIZE_INR = 20000   
+    # ── Timeframes ──
+    MAX_TRADES_RUN = 1000          # Run indefinitely
+    MANDATORY_EXIT_SECONDS = 300   # 5-min max hold
+    CHECK_INTERVAL_SECONDS = 5
+    POLL_INTERVAL_SECONDS = 5
+    COOLDOWN_MINUTES = 0           # Immediate re-entry
 
-    TAKE_PROFIT_PCT = 0.018   # Auto-tuned by session review         # Ignored (exit by time instead)
-    STOP_LOSS_PCT = 1.0           # Ignored (using EARLY_STOP_LOSS_PCT)
-    MAX_POSITIONS = 1             
+    # ── Periodic Self-Improvement ──
+    PERIODIC_REVIEW_TRADES = 5     # Trigger a mini-review every 5 closed trades
+    PERIODIC_REVIEW_SECONDS = 900  # Also review every 15 min (with >=3 new trades)
+
+    # ── Position Sizing ──
+    MAX_POSITION_SIZE_INR = 20000
+    MIN_POSITION_SIZE_INR = 20000
+    STOP_LOSS_PCT = 1.0
+    MAX_POSITIONS = 1
 
     # ── Entry Filters ──
-    MIN_24H_DIP_PCT = -1.0        
-    ENTRY_NEAR_LOW_PCT = 0.02     
-    MOMENTUM_WINDOW_MINS = 5      
-    MIN_MOMENTUM_PCT = 0.0005     
+    MIN_24H_DIP_PCT = -1.0
+    ENTRY_NEAR_LOW_PCT = 0.02
+    MOMENTUM_WINDOW_MINS = 5
+    MIN_MOMENTUM_PCT = 0.0005
+
+    # ── AWS Bedrock LLM ──
+    BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
 
     # ── API ──
     REST_BASE_URL = "https://api.coindcx.com"

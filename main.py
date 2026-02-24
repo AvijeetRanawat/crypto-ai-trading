@@ -15,10 +15,11 @@ async def main():
     channels = config.BLUE_CHIP_WHITELIST
     
     try:
-        # Run both tasks concurrently
+        # Run all tasks concurrently
         await asyncio.gather(
             client.connect_ws(channels),
-            engine.run_loop()
+            engine.run_loop(),
+            engine._periodic_self_improvement_loop(),   # ← background self-improvement
         )
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user.")
