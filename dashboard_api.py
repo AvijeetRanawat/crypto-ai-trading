@@ -67,7 +67,7 @@ async def get_portfolio():
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, timestamp, balance, positions
+        SELECT id, timestamp, balance_inr, open_positions_count
         FROM portfolio
         WHERE timestamp >= ?
         ORDER BY id ASC LIMIT 300
