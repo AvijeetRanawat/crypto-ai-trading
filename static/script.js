@@ -1,21 +1,27 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   Crypto AI Trading Terminal — script.js  (Engine v6 Dynamic Dashboard)
+   Polls every 3 seconds, detects session restarts, shows regime/ATR/session
+   ════════════════════════════════════════════════════════════════════════════ */
+
 const API = "/api";
-let priceChart = null;
-let priceSeries = null;
-let equityChart = null;
-let signalChart = null;
+let priceChart = null, priceSeries = null;
+let equityChart = null, signalChart = null;
 let chartsReady = false;
 let startTime = Date.now();
+let knownSessionStart = null;   // for fresh-start detection
+let lastLogLength = 0;
+let lastTradeCount = 0;
 
-// ── INIT ─────────────────────────────────────────────────────────
+// ── INIT ──────────────────────────────────────────────────────────────────────
 function initCharts() {
     // 1. LightweightCharts — Price
     const container = document.getElementById('priceChart');
     const h = container.parentElement.clientHeight - 56;
-    container.style.height = Math.max(h, 200) + 'px';
+    container.style.height = Math.max(h, 220) + 'px';
 
     priceChart = LightweightCharts.createChart(container, {
         width: container.clientWidth,
-        height: container.clientHeight,
+        height: +container.style.height.replace('px', ''),
         layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#71717a' },
         grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
         rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)' },
@@ -26,282 +32,421 @@ function initCharts() {
     priceSeries = priceChart.addLineSeries({
         color: '#3b82f6', lineWidth: 2,
         priceFormat: { type: 'price', precision: 0, minMove: 1 },
-        lastValueVisible: true,
-        priceLineColor: '#3b82f6',
+        lastValueVisible: true, priceLineColor: '#3b82f6',
     });
 
     new ResizeObserver(() => {
-        const w = container.clientWidth, hh = container.clientHeight;
+        const w = container.clientWidth, hh = +container.style.height.replace('px', '');
         if (w > 0 && hh > 0) priceChart.applyOptions({ width: w, height: hh });
     }).observe(container);
 
-    // 2. Chart.js — Equity
-    equityChart = new Chart(
-        document.getElementById('equityChart').getContext('2d'),
-        {
-            type: 'line',
-            data: {
-                labels: [], datasets: [{
-                    data: [], borderColor: '#22c55e', borderWidth: 2,
-                    pointRadius: 0, tension: 0.4, fill: true, backgroundColor: 'rgba(34,197,94,0.07)'
-                }]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } }, animation: false
-            }
+    // 2. Chart.js — Equity Curve
+    equityChart = new Chart(document.getElementById('equityChart').getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: [], datasets: [{
+                data: [], borderColor: '#22c55e', borderWidth: 2,
+                pointRadius: 0, tension: 0.4, fill: true,
+                backgroundColor: 'rgba(34,197,94,0.07)'
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { x: { display: false }, y: { display: false } },
+            animation: false
         }
-    );
+    });
 
-    // 3. Chart.js — Signal Intelligence bar chart
-    signalChart = new Chart(
-        document.getElementById('signalChart').getContext('2d'),
-        {
-            type: 'bar',
-            data: {
-                labels: [],
-                datasets: [
-                    { label: 'BUY votes', data: [], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 2, barPercentage: 0.7 },
-                    { label: 'SELL votes', data: [], backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 2, barPercentage: 0.7 },
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: {
-                    legend: { display: false }, tooltip: {
-                        callbacks: {
-                            title: (items) => {
-                                const ds = items[0]?.dataset?.label;
-                                return `${ds} @ ${items[0]?.label}`;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: { display: false, stacked: false },
-                    y: {
-                        display: true, min: 0, max: 5, ticks: { color: '#71717a', font: { size: 9 }, stepSize: 1 },
-                        grid: { color: 'rgba(255,255,255,0.03)' }
-                    }
-                }
+    // 3. Chart.js — Signal Intelligence
+    signalChart = new Chart(document.getElementById('signalChart').getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'BUY votes', data: [], backgroundColor: 'rgba(34,197,94,0.75)', borderRadius: 3, barPercentage: 0.7 },
+                { label: 'SELL votes', data: [], backgroundColor: 'rgba(239,68,68,0.75)', borderRadius: 3, barPercentage: 0.7 },
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { display: false },
+                y: { min: 0, max: 5, ticks: { color: '#4b5563', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.04)' } }
             }
         }
-    );
+    });
 
     chartsReady = true;
 }
 
-// ── HELPERS ───────────────────────────────────────────────────────
-function dedup(series) {
-    const seen = new Set();
-    return series.filter(p => { if (seen.has(p.time)) return false; seen.add(p.time); return true; });
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const fmt = (n) => n >= 0
+    ? `+₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `-₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const fmtPct = (n) => (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+
+const el = (id) => document.getElementById(id);
+
+function setClass(elem, cls) {
+    elem.className = elem.className.replace(/\b(positive|negative|neutral|warn)\b/g, '');
+    if (cls) elem.classList.add(cls);
 }
 
-function formatINR(n) {
-    return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+function flashUpdate(elem) {
+    elem.classList.remove('flash-update');
+    void elem.offsetWidth;
+    elem.classList.add('flash-update');
 }
 
-// ── MAIN UPDATE ───────────────────────────────────────────────────
-async function updateDashboard() {
-    if (!chartsReady) return;
-
+// ── FRESH START DETECTION ─────────────────────────────────────────────────────
+async function checkFreshStart() {
     try {
-        // ── 1. Price chart ──────────────────────────────────────────
-        const histRes = await fetch(`${API}/market/history?symbol=BTCINR`);
-        const histData = await histRes.json();
-
-        if (histData.length > 1) {
-            const series = histData.map(d => ({
-                time: Math.floor(new Date(d.timestamp).getTime() / 1000),
-                value: d.price,
-            }));
-            priceSeries.setData(dedup(series));
-
-            const latest = histData[histData.length - 1];
-            const prev = histData[Math.max(0, histData.length - 2)];
-            const pct = ((latest.price - prev.price) / prev.price * 100).toFixed(3);
-            document.getElementById('current-price').textContent = `₹${formatINR(latest.price)}`;
-            const changeEl = document.getElementById('price-change');
-            changeEl.textContent = `${pct >= 0 ? '+' : ''}${pct}%`;
-            changeEl.className = `live-change ${pct >= 0 ? 'positive' : 'negative'}`;
+        const res = await fetch(`${API}/session_start`);
+        const data = await res.json();
+        if (!knownSessionStart) {
+            knownSessionStart = data.session_start;
+            startTime = Date.now();
+            return;
         }
-
-        // ── 2. Signal Intelligence ──────────────────────────────────
-        const sigRes = await fetch(`${API}/signals/history?symbol=BTCINR&limit=120`);
-        const sigData = await sigRes.json();
-
-        if (sigData.length > 0) {
-            const labels = sigData.map(s => s.timestamp.slice(11, 16));
-            const buyVotes = sigData.map(s => s.buy_votes);
-            const sellVotes = sigData.map(s => s.sell_votes);
-
-            signalChart.data.labels = labels;
-            signalChart.data.datasets[0].data = buyVotes;
-            signalChart.data.datasets[1].data = sellVotes;
-            signalChart.update('none');
-
-            // Live vote tally from most recent signal event
-            const latest = sigData[sigData.length - 1];
-            const bv = latest.buy_votes, sv = latest.sell_votes;
-            document.getElementById('buy-bar').style.width = `${(bv / 5) * 100}%`;
-            document.getElementById('sell-bar').style.width = `${(sv / 5) * 100}%`;
-            document.getElementById('buy-count').textContent = `${bv}/5`;
-            document.getElementById('sell-count').textContent = `${sv}/5`;
-            document.getElementById('rsi-val').textContent = latest.rsi?.toFixed(1) ?? '—';
-            document.getElementById('rsi-val').className = `ta-val ${latest.rsi < 30 ? 'positive' : latest.rsi > 70 ? 'negative' : ''}`;
-            document.getElementById('macd-val').textContent = latest.macd ?? '—';
-            document.getElementById('macd-val').className = `ta-val ${latest.macd?.includes('BULL') ? 'positive' : latest.macd?.includes('BEAR') ? 'negative' : ''}`;
-            document.getElementById('bb-val').textContent = latest.bb_pct ? `${latest.bb_pct.toFixed(0)}%` : '—';
-
-            const outcomeEl = document.getElementById('outcome-val');
-            const outcome = latest.outcome;
-            outcomeEl.textContent = outcome;
-            outcomeEl.className = `ta-val ${outcome === 'TRADED' ? 'positive' : outcome === 'MISSED' ? '' : ''}`;
-            if (outcome === 'MISSED') outcomeEl.style.color = 'var(--yellow)';
-            else if (outcome === 'TRADED') outcomeEl.style.color = 'var(--green)';
-            else outcomeEl.style.color = 'var(--muted)';
-
-            // TA badges in chart header
-            document.getElementById('rsi-badge').textContent = `RSI ${latest.rsi?.toFixed(1) ?? '—'}`;
-            document.getElementById('macd-badge').textContent = `MACD ${(latest.macd ?? '—').split('_')[0]}`;
-            document.getElementById('bb-badge').textContent = `BB ${latest.bb_pct?.toFixed(0) ?? '—'}%`;
-
-            // ── Missed opportunity counter ──
-            const missedCount = sigData.filter(s => s.outcome === 'MISSED').length;
-            document.getElementById('missed-count-val').textContent = missedCount;
-
-            // ── Price chart markers: 3 types ──
-            const markers = [];
-
-            // Type 1: TRADED entries (blue triangle up/down)
-            for (const s of sigData) {
-                if (s.outcome === 'TRADED') {
-                    const isBuy = s.claude_action === 'LONG' || s.claude_action === 'BUY';
-                    markers.push({
-                        time: Math.floor(new Date(s.timestamp).getTime() / 1000),
-                        position: isBuy ? 'belowBar' : 'aboveBar',
-                        color: '#3b82f6',                // Blue = trade entered
-                        shape: isBuy ? 'arrowUp' : 'arrowDown',
-                        text: `ENTRY ${s.claude_action}`,
-                        size: 2,
-                    });
-                }
+        if (data.session_start !== knownSessionStart) {
+            // New session detected — reset local state
+            console.log('[Dashboard] New session detected, refreshing UI...');
+            knownSessionStart = data.session_start;
+            startTime = Date.now();
+            lastTradeCount = 0;
+            lastLogLength = 0;
+            // Clear charts
+            if (chartsReady) {
+                priceSeries.setData([]);
+                equityChart.data.labels = [];
+                equityChart.data.datasets[0].data = [];
+                equityChart.update();
+                signalChart.data.labels = [];
+                signalChart.data.datasets[0].data = [];
+                signalChart.data.datasets[1].data = [];
+                signalChart.update();
             }
-
-            // Type 2: MISSED opportunities (yellow circle)
-            for (const s of sigData) {
-                if (s.outcome === 'MISSED' && Math.max(s.buy_votes, s.sell_votes) >= 3) {
-                    const isBuy = s.buy_votes >= s.sell_votes;
-                    markers.push({
-                        time: Math.floor(new Date(s.timestamp).getTime() / 1000),
-                        position: isBuy ? 'belowBar' : 'aboveBar',
-                        color: '#facc15',                // Yellow = missed opportunity
-                        shape: 'circle',
-                        text: `MISSED (${Math.max(s.buy_votes, s.sell_votes)}/5)`,
-                        size: 1,
-                    });
-                }
-            }
-
-            // Sort markers by time (required by LightweightCharts)
-            markers.sort((a, b) => a.time - b.time);
-            if (markers.length) priceSeries.setMarkers(markers);
+            el('trades-list').innerHTML = '<div class="empty-state">New session — no trades yet</div>';
+            el('lessons-log').innerHTML = '';
+            el('intent-display').textContent = 'New session starting...';
+            el('balance-val').textContent = '₹1,00,000';
+            el('total-profit-val').textContent = '+₹0.00';
+            el('win-rate-val').textContent = '--%';
+            el('trades-count-val').textContent = '0';
+            el('missed-count-val').textContent = '0';
         }
-
-        // ── 3. Trades + Exit markers (green/red at exit) ────────────
-        const tradesRes = await fetch(`${API}/trades/recent`);
-        const tradesData = await tradesRes.json();
-
-        const exitMarkers = [];
-        let wins = 0, closed = 0, tradeCount = 0;
-        tradesData.forEach(t => {
-            tradeCount++;
-            if (t.status === 'CLOSED') {
-                closed++;
-                if (t.pnl > 0) wins++;
-                if (t.exit_time) {
-                    exitMarkers.push({
-                        time: Math.floor(new Date(t.exit_time).getTime() / 1000),
-                        position: t.pnl >= 0 ? 'aboveBar' : 'belowBar',
-                        color: t.pnl >= 0 ? '#22c55e' : '#ef4444',  // Green = profit, Red = loss
-                        shape: t.pnl >= 0 ? 'arrowDown' : 'arrowUp',
-                        text: `${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(0)}`,
-                        size: 1,
-                    });
-                }
-            }
-        });
-
-        // Merge entry + missed + exit markers, sort by time
-        const allMarkers = [...(priceSeries.markers ? [] : []), ...exitMarkers];
-        if (allMarkers.length) {
-            // Combine with signal markers (re-fetch needed; instead just add exits to existing)
-            const currentMarkers = priceSeries.markers?.() ?? [];
-            const merged = [...currentMarkers.filter(m => !exitMarkers.find(e => e.time === m.time)), ...exitMarkers];
-            merged.sort((a, b) => a.time - b.time);
-        }
-
-        document.getElementById('win-rate-val').textContent = closed ? `${Math.round((wins / closed) * 100)}%` : '--%';
-        document.getElementById('trades-count-val').textContent = tradeCount;
-
-        document.getElementById('trades-list').innerHTML = tradesData.slice(0, 5).map(t => `
-            <div class="trade-row">
-                <div class="t-info">
-                    <span class="t-sym">${t.symbol.replace('INR', '')}</span>
-                    <span class="t-side ${t.side.toLowerCase()}">${t.side} @ ₹${formatINR(t.price)}</span>
-                </div>
-                <span class="t-pnl ${t.pnl >= 0 ? 'positive' : 'negative'}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(0)}</span>
-            </div>`).join('');
-
-        // ── 4. Portfolio & Equity ──────────────────────────────────
-        const portRes = await fetch(`${API}/portfolio/history`);
-        const portData = await portRes.json();
-        if (portData.length > 0) {
-            const l = portData[0];
-            const pnl = l.balance - 100000;
-            document.getElementById('balance-val').textContent = `₹${formatINR(l.balance)}`;
-            const pnlEl = document.getElementById('total-profit-val');
-            pnlEl.textContent = `${pnl >= 0 ? '+' : ''}₹${formatINR(Math.abs(pnl))}`;
-            pnlEl.className = `pill-value ${pnl >= 0 ? 'positive' : 'negative'}`;
-            const hist = [...portData].reverse();
-            equityChart.data.labels = hist.map(h => h.timestamp);
-            equityChart.data.datasets[0].data = hist.map(h => h.balance);
-            equityChart.update('none');
-        }
-
-        // ── 5. AI Intent ───────────────────────────────────────────
-        const intentData = await (await fetch(`${API}/intent`)).json();
-        document.getElementById('intent-display').innerHTML =
-            `<span>${intentData.message}</span>` +
-            (intentData.targets?.length ? `<div style="margin-top:4px;font-size:10px;color:var(--muted)">Watching: ${intentData.targets.join(', ')}</div>` : '');
-
-        // ── 6. Lessons ─────────────────────────────────────────────
-        const lessonsData = await (await fetch(`${API}/lessons`)).json();
-        document.getElementById('lessons-log').innerHTML = lessonsData.map(l => `
-            <div class="lesson-box ${l.severity?.toLowerCase()}">
-                <div class="l-title">${l.severity} · ${(l.condition || '').slice(0, 45)}</div>
-                <div class="l-body">${l.lesson}</div>
-            </div>`).join('');
-
-        // ── 7. Logs ────────────────────────────────────────────────
-        const logsData = await (await fetch(`${API}/logs`)).json();
-        const logEl = document.getElementById('log-terminal');
-        logEl.textContent = logsData.logs.join('');
-        logEl.scrollTop = logEl.scrollHeight;
-
-        // ── 8. Uptime ──────────────────────────────────────────────
-        const s = Math.floor((Date.now() - startTime) / 1000);
-        document.getElementById('uptime-val').textContent =
-            `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-
-    } catch (err) {
-        console.error('Dashboard sync error:', err);
-    }
+    } catch (e) { /* backend not yet ready */ }
 }
 
-// ── BOOT ─────────────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+// ── UPTIME ────────────────────────────────────────────────────────────────────
+function updateUptime() {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    el('uptime-val').textContent = `${hh}:${mm}:${ss}`;
+}
+
+// ── PRICE CHART ───────────────────────────────────────────────────────────────
+async function updatePriceChart() {
+    try {
+        const res = await fetch(`${API}/market/history?symbol=BTCINR`);
+        const data = await res.json();
+        if (!data.length || !chartsReady) return;
+
+        const series = data.map(d => ({
+            time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+            value: d.price
+        })).filter(d => d.time > 0).sort((a, b) => a.time - b.time);
+
+        // Deduplicate by time
+        const seen = new Set(), unique = [];
+        for (const pt of series) { if (!seen.has(pt.time)) { seen.add(pt.time); unique.push(pt); } }
+
+        if (unique.length > 1) priceSeries.setData(unique);
+
+        // Live price header
+        const latest = data[data.length - 1];
+        const prev = data[Math.max(0, data.length - 12)]; // ~60s ago
+        const change = ((latest.price - prev.price) / prev.price) * 100;
+        const priceEl = el('current-price');
+        priceEl.textContent = `₹${latest.price.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+        flashUpdate(priceEl);
+        const changeEl = el('price-change');
+        changeEl.textContent = fmtPct(change);
+        changeEl.className = 'live-change ' + (change >= 0 ? 'positive' : 'negative');
+    } catch (e) { console.warn('price chart update failed', e); }
+}
+
+// ── PORTFOLIO SUMMARY ─────────────────────────────────────────────────────────
+async function updatePortfolioSummary() {
+    try {
+        const res = await fetch(`${API}/portfolio/summary`);
+        const d = await res.json();
+
+        const pnlEl = el('total-profit-val');
+        pnlEl.textContent = fmt(d.total_pnl);
+        setClass(pnlEl, d.total_pnl >= 0 ? 'positive' : 'negative');
+        flashUpdate(pnlEl);
+
+        el('win-rate-val').textContent = d.win_rate.toFixed(1) + '%';
+        el('trades-count-val').textContent = d.total_trades;
+        el('missed-count-val').textContent = d.missed_count;
+
+        // Approximate balance (start ₹1L + total_pnl)
+        const balance = 100000 + d.total_pnl;
+        el('balance-val').textContent = '₹' + balance.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+        // Open position indicator
+        const openEl = el('open-position');
+        if (d.open_position) {
+            const op = d.open_position;
+            openEl.textContent = `📈 ${op.side} ${op.symbol} @ ₹${op.entry_price?.toLocaleString('en-IN', { maximumFractionDigits: 0 }) ?? '—'}`;
+            openEl.className = 'open-pos-badge ' + (op.side === 'LONG' ? 'positive' : 'negative');
+        } else {
+            openEl.textContent = 'No open position';
+            openEl.className = 'open-pos-badge neutral';
+        }
+    } catch (e) { console.warn('portfolio summary failed', e); }
+}
+
+// ── EQUITY CURVE ──────────────────────────────────────────────────────────────
+async function updateEquityCurve() {
+    try {
+        const res = await fetch(`${API}/portfolio/history`);
+        const data = await res.json();
+        if (!data.length || !chartsReady) return;
+
+        const labels = data.map(d => d.timestamp.slice(11, 16));
+        const values = data.map(d => d.balance);
+        equityChart.data.labels = labels;
+        equityChart.data.datasets[0].data = values;
+        equityChart.update('none');
+    } catch (e) { }
+}
+
+// ── SIGNALS ───────────────────────────────────────────────────────────────────
+async function updateSignals() {
+    try {
+        const res = await fetch(`${API}/signals/history?symbol=BTCINR&limit=60`);
+        const data = await res.json();
+        if (!data.length || !chartsReady) return;
+
+        const labels = data.map(d => d.timestamp.slice(11, 16));
+        const buy = data.map(d => d.buy_votes);
+        const sell = data.map(d => d.sell_votes);
+        signalChart.data.labels = labels;
+        signalChart.data.datasets[0].data = buy;
+        signalChart.data.datasets[1].data = sell;
+        signalChart.update('none');
+
+        // RSI/MACD/BB badges from latest datapoint
+        const latest = data[data.length - 1];
+        if (latest) {
+            el('rsi-badge').textContent = `RSI ${latest.rsi?.toFixed(1) ?? '—'}`;
+            el('macd-badge').textContent = `MACD ${latest.macd ?? '—'}`;
+            el('bb-badge').textContent = `BB ${latest.bb_pct?.toFixed(0) ?? '—'}%`;
+
+            // Vote tally
+            const totalVotes = 5;
+            const buyPct = (latest.buy_votes / totalVotes) * 100;
+            const sellPct = (latest.sell_votes / totalVotes) * 100;
+            el('buy-bar').style.width = buyPct + '%';
+            el('sell-bar').style.width = sellPct + '%';
+            el('buy-count').textContent = `${latest.buy_votes}/5`;
+            el('sell-count').textContent = `${latest.sell_votes}/5`;
+            el('rsi-val').textContent = latest.rsi?.toFixed(1) ?? '—';
+            el('macd-val').textContent = latest.macd ?? '—';
+            el('bb-val').textContent = latest.bb_pct?.toFixed(0) + '%' ?? '—';
+            el('outcome-val').textContent = latest.outcome ?? '—';
+
+            const outcomeEl = el('outcome-val');
+            if (latest.outcome === 'TRADED') setClass(outcomeEl, 'positive');
+            else if (latest.outcome === 'MISSED') setClass(outcomeEl, 'warn');
+            else setClass(outcomeEl, 'neutral');
+        }
+
+        // Trade markers on price chart
+        const traded = data.filter(d => d.outcome === 'TRADED');
+        const missed = data.filter(d => d.outcome === 'MISSED');
+        try {
+            const markers = [
+                ...traded.map(d => ({
+                    time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+                    position: d.claude_action === 'LONG' ? 'belowBar' : 'aboveBar',
+                    color: '#22c55e', shape: d.claude_action === 'LONG' ? 'arrowUp' : 'arrowDown',
+                    text: `TRADE ${d.claude_action} (${(d.claude_conf * 100).toFixed(0)}%)`,
+                })),
+                ...missed.map(d => ({
+                    time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+                    position: 'belowBar', color: '#f59e0b', shape: 'circle',
+                    text: `MISSED`,
+                })),
+            ].filter(m => m.time > 0).sort((a, b) => a.time - b.time);
+
+            // Deduplicate by time
+            const seenT = new Set(), uniqueM = [];
+            for (const m of markers) { if (!seenT.has(m.time)) { seenT.add(m.time); uniqueM.push(m); } }
+            if (priceSeries) priceSeries.setMarkers(uniqueM);
+        } catch (e) { }
+
+    } catch (e) { console.warn('signals update failed', e); }
+}
+
+// ── TRADES TABLE ──────────────────────────────────────────────────────────────
+async function updateTrades() {
+    try {
+        const res = await fetch(`${API}/trades/recent`);
+        const data = await res.json();
+        if (!data.length) {
+            el('trades-list').innerHTML = '<div class="empty-state">No trades yet</div>';
+            return;
+        }
+
+        // Flash if new trade appeared
+        const closed = data.filter(t => t.status === 'CLOSED');
+        if (closed.length > lastTradeCount) flashUpdate(el('trades-list'));
+        lastTradeCount = closed.length;
+
+        const rows = data.slice(0, 15).map(t => {
+            const pnl = t.pnl ?? 0;
+            const cls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral';
+            const sideIcon = t.side === 'LONG' ? '↑' : '↓';
+            const time = t.entry_time ? t.entry_time.slice(11, 16) : '--:--';
+            return `<div class="trade-row ${cls}">
+                <span class="trade-side ${t.side === 'LONG' ? 'buy' : 'sell'}">${sideIcon} ${t.side}</span>
+                <span class="trade-price">₹${(t.price || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                <span class="trade-pnl ${cls}">${pnl !== 0 ? fmt(pnl) : t.status}</span>
+                <span class="trade-time">${time}</span>
+            </div>`;
+        }).join('');
+        el('trades-list').innerHTML = rows;
+    } catch (e) { }
+}
+
+// ── LESSONS ───────────────────────────────────────────────────────────────────
+async function updateLessons() {
+    try {
+        const res = await fetch(`${API}/lessons`);
+        const data = await res.json();
+        if (!data.length) {
+            el('lessons-log').innerHTML = '<div class="empty-state">No lessons yet</div>';
+            return;
+        }
+        const html = data.map(l => {
+            const icon = l.severity === 'GOLDEN' ? '🏆' : l.severity === 'WIN' ? '✅' : '❌';
+            const cls = l.severity === 'GOLDEN' ? 'lesson-gold' : l.severity === 'WIN' ? 'lesson-win' : 'lesson-loss';
+            return `<div class="lesson-row ${cls}">
+                <span class="lesson-icon">${icon}</span>
+                <span class="lesson-text"><b>${l.condition}</b> → ${l.lesson}</span>
+            </div>`;
+        }).join('');
+        el('lessons-log').innerHTML = html;
+    } catch (e) { }
+}
+
+// ── INTENT ────────────────────────────────────────────────────────────────────
+async function updateIntent() {
+    try {
+        const res = await fetch(`${API}/intent`);
+        const data = await res.json();
+        const intentEl = el('intent-display');
+        if (data.message !== intentEl.textContent) {
+            intentEl.textContent = data.message;
+            flashUpdate(intentEl);
+        }
+    } catch (e) { }
+}
+
+// ── REGIME ────────────────────────────────────────────────────────────────────
+async function updateRegime() {
+    try {
+        const res = await fetch(`${API}/regime`);
+        const d = await res.json();
+
+        const regimeEl = el('regime-badge');
+        const regimeVerdict = el('regime-verdict');
+        const atrEl = el('atr-verdict');
+        const sessEl = el('session-badge');
+        const sessVerdict = el('session-verdict');
+
+        if (!regimeEl) return;
+
+        // Regime badge
+        const rMap = { BULL: 'regime-bull', BEAR: 'regime-bear', CHOPPY: 'regime-choppy', NEUTRAL: 'regime-neutral', UNKNOWN: 'regime-neutral', WARMING_UP: 'regime-neutral', ERROR: 'regime-neutral' };
+        regimeEl.textContent = d.regime || 'WARMING';
+        regimeEl.className = 'regime-badge ' + (rMap[d.regime] || 'regime-neutral');
+        if (regimeVerdict) regimeVerdict.textContent = d.verdict || '';
+
+        // ATR
+        if (atrEl && d.atr_verdict) {
+            atrEl.textContent = d.atr_verdict;
+        }
+
+        // Session
+        const sMap = { PREMIUM: 'sess-premium', HIGH: 'sess-high', MODERATE: 'sess-moderate', LOW: 'sess-low' };
+        if (sessEl) {
+            sessEl.textContent = d.session || '—';
+            sessEl.className = 'sess-badge ' + (sMap[d.session_quality] || 'sess-low');
+        }
+        if (sessVerdict && d.session_verdict) sessVerdict.textContent = d.session_verdict;
+    } catch (e) { }
+}
+
+// ── LOGS ──────────────────────────────────────────────────────────────────────
+async function updateLogs() {
+    try {
+        const res = await fetch(`${API}/logs?lines=60`);
+        const data = await res.json();
+        if (!data.logs) return;
+        const logEl = el('log-terminal');
+        const content = data.logs.join('').trim();
+        if (content !== logEl.dataset.last) {
+            logEl.textContent = content;
+            logEl.dataset.last = content;
+            // Auto-scroll to bottom
+            logEl.scrollTop = logEl.scrollHeight;
+            flashUpdate(logEl);
+        }
+    } catch (e) { }
+}
+
+// ── MASTER POLL ───────────────────────────────────────────────────────────────
+async function pollAll() {
+    await checkFreshStart();
+    await Promise.allSettled([
+        updatePriceChart(),
+        updatePortfolioSummary(),
+        updateIntent(),
+        updateSignals(),
+        updateRegime(),
+    ]);
+}
+
+async function pollSlow() {
+    await Promise.allSettled([
+        updateEquityCurve(),
+        updateTrades(),
+        updateLessons(),
+        updateLogs(),
+    ]);
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
     initCharts();
-    updateDashboard();
-    setInterval(updateDashboard, 3000);
+    setInterval(updateUptime, 1000);
+
+    // First paint
+    await pollAll();
+    await pollSlow();
+
+    // Fast cycle: price, intent, signals, regime every 3 seconds
+    setInterval(pollAll, 3000);
+
+    // Slower cycle: trades, equity, lessons, logs every 8 seconds
+    setInterval(pollSlow, 8000);
 });

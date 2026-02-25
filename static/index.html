@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto AI Trading Terminal</title>
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=6">
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
         rel="stylesheet">
@@ -21,7 +21,7 @@
             <div class="topbar-left">
                 <div class="dot-live"></div>
                 <span class="brand-name">AI Trading Terminal</span>
-                <span class="mode-badge">SIMULATION</span>
+                <span class="mode-badge">SIMULATION · v6</span>
             </div>
             <div class="topbar-right">
                 <div class="stat-pill">
@@ -41,7 +41,7 @@
                     <span id="trades-count-val" class="pill-value mono">0</span>
                 </div>
                 <div class="stat-pill">
-                    <span class="pill-label">MISSED OPP.</span>
+                    <span class="pill-label">MISSED</span>
                     <span id="missed-count-val" class="pill-value" style="color: var(--yellow)">0</span>
                 </div>
                 <div class="stat-pill">
@@ -60,9 +60,10 @@
                     <span class="pair">BTC / INR</span>
                     <span id="current-price" class="live-price">₹0.00</span>
                     <span id="price-change" class="live-change">+0.000%</span>
+                    <span id="open-position" class="open-pos-badge neutral">No open position</span>
                     <div class="legend">
-                        <span class="legend-item"><span class="legend-dot traded"></span>Trade Entered</span>
-                        <span class="legend-item"><span class="legend-dot missed"></span>Missed Opportunity</span>
+                        <span class="legend-item"><span class="legend-dot traded"></span>Traded</span>
+                        <span class="legend-item"><span class="legend-dot missed"></span>Missed</span>
                     </div>
                 </div>
 
@@ -80,10 +81,10 @@
                 <!-- Signal Intelligence Panel -->
                 <div class="signal-panel glass">
                     <div class="chart-label-row">
-                        <span class="chart-label">SIGNAL INTELLIGENCE · Tool votes per evaluation cycle</span>
+                        <span class="chart-label">SIGNAL INTELLIGENCE</span>
                         <span class="legend-inline">
-                            <span style="color:var(--green)">█</span> BUY votes
-                            <span style="color:var(--red)">█</span> SELL votes
+                            <span style="color:var(--green)">█</span> BUY &nbsp;
+                            <span style="color:var(--red)">█</span> SELL &nbsp;
                             <span style="color:var(--yellow)">◆</span> Missed &nbsp;
                             <span style="color:var(--accent)">▲</span> Traded
                         </span>
@@ -106,6 +107,26 @@
 
             <!-- RIGHT: AI Panel -->
             <aside class="ai-panel">
+
+                <!-- Market Regime -->
+                <div class="panel-section glass">
+                    <div class="section-header">
+                        <span>🌊 MARKET REGIME</span>
+                    </div>
+                    <div class="regime-row">
+                        <span id="regime-badge" class="regime-badge regime-neutral">WARMING</span>
+                        <div class="regime-detail">
+                            <div id="regime-verdict" class="regime-verdict-text">Loading...</div>
+                            <div id="atr-verdict" class="atr-text">ATR: —</div>
+                        </div>
+                    </div>
+                    <div class="session-row">
+                        <span id="session-badge" class="sess-badge sess-low">—</span>
+                        <div id="session-verdict" class="sess-verdict-text">Loading session window...</div>
+                    </div>
+                </div>
+
+                <!-- AI Intent -->
                 <div class="panel-section glass">
                     <div class="section-header">
                         <div class="pulse-dot"></div>
@@ -114,6 +135,7 @@
                     <div id="intent-display" class="intent-text">Initializing...</div>
                 </div>
 
+                <!-- Live Vote Tally -->
                 <div class="panel-section glass signal-votes-panel">
                     <div class="section-header">
                         <span>📊 LIVE VOTE TALLY</span>
@@ -154,6 +176,7 @@
                     </div>
                 </div>
 
+                <!-- Lessons Learned -->
                 <div class="panel-section glass lessons-panel">
                     <div class="section-header">
                         <span>🎓 LESSONS LEARNED</span>
@@ -164,11 +187,11 @@
         </main>
 
         <section class="logs-bar glass">
-            <div class="logs-title">SYSTEM LOG</div>
+            <div class="logs-title">SYSTEM LOG · AUTO-SCROLL</div>
             <pre id="log-terminal" class="log-body">...</pre>
         </section>
     </div>
-    <script src="script.js?v=3"></script>
+    <script src="script.js?v=6"></script>
 </body>
 
 </html>
