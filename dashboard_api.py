@@ -18,7 +18,7 @@ app.add_middleware(
 )
 
 # ── Session start time — set once when this process boots ────────────────────
-SESSION_START = datetime.utcnow().isoformat()
+SESSION_START = datetime.now().isoformat()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers

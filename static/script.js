@@ -142,17 +142,28 @@ async function updateWarmup() {
 }
 
 // ── FRESH START DETECTION ─────────────────────────────────────────────────────
+// Use localStorage so that browser refreshes do NOT count as a new session.
+// Only a true system restart (new SERVER_START value) triggers a full UI reset.
 async function checkFreshStart() {
     try {
         const res = await fetch(`${API}/session_start`);
         const data = await res.json();
-        if (!knownSessionStart) {
+        const stored = localStorage.getItem('tradingSessionStart');
+
+        if (!stored) {
+            // First ever page load — just record the session, don't wipe anything
+            localStorage.setItem('tradingSessionStart', data.session_start);
             knownSessionStart = data.session_start;
             startTime = Date.now();
             return;
         }
-        if (data.session_start !== knownSessionStart) {
-            console.log('[Dashboard] New session detected, refreshing UI...');
+
+        knownSessionStart = stored;
+
+        if (data.session_start !== stored) {
+            // True system restart detected — reset everything
+            console.log('[Dashboard] System restarted — resetting UI...');
+            localStorage.setItem('tradingSessionStart', data.session_start);
             knownSessionStart = data.session_start;
             startTime = Date.now();
             lastTradeCount = 0;
@@ -179,6 +190,7 @@ async function checkFreshStart() {
             el('trades-count-val').textContent = '0';
             el('missed-count-val').textContent = '0';
         }
+        // else: same session, browser refresh — do nothing, charts will refill from API
     } catch (e) { }
 }
 
