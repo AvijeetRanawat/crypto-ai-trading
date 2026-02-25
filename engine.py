@@ -201,81 +201,103 @@ class TradingEngine:
 
     async def _periodic_self_improvement_loop(self):
         """
-        Background loop: runs continuously while the bot trades.
-        Every PERIODIC_REVIEW_TRADES closed trades (or PERIODIC_REVIEW_INTERVAL_SECONDS),
-        calls run_mini_review() to:
-          1. Analyze recent performance with Claude
-          2. Save new lessons
-          3. Auto-tune config (confidence threshold, stop-loss, take-profit)
-          4. Commit changes to GitHub
+        Background loop: fires every PERIODIC_REVIEW_SECONDS or every
+        PERIODIC_REVIEW_TRADES closed trades — whichever comes first.
+        Calls run_mini_review() which: analyzes recent trades with Claude,
+        saves new lessons, auto-tunes config, commits to GitHub.
         """
         from session_review import run_mini_review
-        
-        REVIEW_EVERY_N_TRADES   = getattr(config, 'PERIODIC_REVIEW_TRADES', 5)
-        REVIEW_EVERY_N_SECONDS  = getattr(config, 'PERIODIC_REVIEW_SECONDS', 900)  # 15 min
-        MIN_TRADES_FOR_TIME_REVIEW = 3  # at least 3 new trades before time-based review
 
-        last_reviewed_trade_id  = 0
-        last_review_time        = datetime.now()
-        review_count            = 0
+        REVIEW_SECS   = getattr(config, 'PERIODIC_REVIEW_SECONDS', 600)   # 10 min
+        REVIEW_TRADES = getattr(config, 'PERIODIC_REVIEW_TRADES', 5)
 
-        logger.info(f"🔁 Periodic Self-Improvement Loop started (every {REVIEW_EVERY_N_TRADES} trades or {REVIEW_EVERY_N_SECONDS//60} min)")
+        last_reviewed_trade_id = 0
+        last_review_time       = datetime.now()
+        review_count           = 0
+        last_closed_snapshot   = 0   # tracks trades_closed at last review
 
-        await asyncio.sleep(60)  # Give the engine 60s to warm up before first check
+        logger.info(
+            f"🔁 Periodic Self-Improvement Loop started "
+            f"(every {REVIEW_SECS//60} min OR every {REVIEW_TRADES} trades)"
+        )
+
+        await asyncio.sleep(90)  # 90s warm-up before first check
 
         while True:
             try:
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(60)   # Tick every 60 seconds
 
                 if not self.llm_agent or not self.llm_agent.bedrock:
                     continue
 
-                new_trades = self.trades_closed - (last_reviewed_trade_id // 1 if last_reviewed_trade_id else 0)
-                trades_since_last = self.trades_closed  # total closed so far (proxy for "new")
-                time_since_last   = (datetime.now() - last_review_time).total_seconds()
+                now             = datetime.now()
+                secs_since      = (now - last_review_time).total_seconds()
+                new_trades      = self.trades_closed - last_closed_snapshot
 
-                # Trigger condition: enough new trades OR enough time has passed
-                enough_by_trades = (self.trades_closed - (review_count * REVIEW_EVERY_N_TRADES)) >= REVIEW_EVERY_N_TRADES
-                enough_by_time   = (time_since_last >= REVIEW_EVERY_N_SECONDS and self.trades_closed >= last_reviewed_trade_id + MIN_TRADES_FOR_TIME_REVIEW)
-
-                if not (enough_by_trades or enough_by_time):
-                    continue
-
-                # Don't run during an open position (wait for calm)
-                if len(self.simulator.positions) > 0:
-                    logger.info("🔁 Periodic review ready but position open — waiting...")
-                    continue
-
-                review_count += 1
-                label    = f"PERIODIC-{review_count}"
-                logger.info(f"\n{'='*55}")
-                logger.info(f"🔁 PERIODIC SELF-IMPROVEMENT #{review_count}")
-                logger.info(f"   Trades since last: {self.trades_closed - (review_count-1)*REVIEW_EVERY_N_TRADES}")
-                logger.info(f"   Time since last:   {int(time_since_last//60)} min")
-                logger.info(f"{'='*55}")
-
-                update_intent(f"🔁 Running periodic self-improvement #{review_count}...", [])
-
-                new_id = run_mini_review(
-                    bedrock_client=self.llm_agent.bedrock,
-                    since_trade_id=last_reviewed_trade_id,
-                    label=label
+                # Progress log so the user can see it's alive
+                logger.info(
+                    f"🔁 Review check: {new_trades} new trades | "
+                    f"{int(secs_since//60)}m{int(secs_since%60)}s elapsed "
+                    f"(next at {REVIEW_TRADES} trades or {REVIEW_SECS//60}min)"
                 )
-                last_reviewed_trade_id = new_id
-                last_review_time       = datetime.now()
 
-                # Reload config so new values take effect immediately (without restart)
-                import importlib, config as cfg_module
-                importlib.reload(cfg_module)
-                from config import config as new_cfg
-                logger.info(f"🔄 Config reloaded: confidence={new_cfg.MIN_ENSEMBLE_CONFIDENCE}, SL={new_cfg.EARLY_STOP_LOSS_PCT}, TP={new_cfg.TAKE_PROFIT_PCT}")
+                time_trigger   = secs_since >= REVIEW_SECS
+                trades_trigger = new_trades >= REVIEW_TRADES
+
+                if not (time_trigger or trades_trigger):
+                    continue
+
+                # Skip if a position is open — wait for clean state
+                if self.simulator.positions:
+                    logger.info("🔁 Review ready but position open — waiting for it to close...")
+                    continue
+
+                # ── Run the review ──────────────────────────────────────────
+                review_count += 1
+                trigger_reason = "time" if time_trigger and not trades_trigger else "trades"
+                logger.info(f"\n{'='*60}")
+                logger.info(f"🔁 PERIODIC SELF-IMPROVEMENT #{review_count} (triggered by {trigger_reason})")
+                logger.info(f"   New trades since last review: {new_trades}")
+                logger.info(f"   Time since last review:       {int(secs_since//60)} min {int(secs_since%60)}s")
+                logger.info(f"{'='*60}")
+
+                update_intent(
+                    f"🔁 Running self-improvement #{review_count} "
+                    f"({new_trades} new trades, {int(secs_since//60)}m elapsed)...",
+                    []
+                )
+
+                try:
+                    new_id = run_mini_review(
+                        bedrock_client=self.llm_agent.bedrock,
+                        since_trade_id=last_reviewed_trade_id,
+                        label=f"PERIODIC-{review_count}",
+                    )
+                    last_reviewed_trade_id = new_id
+                except Exception as e:
+                    logger.error(f"run_mini_review failed: {e}", exc_info=True)
+
+                last_review_time     = now
+                last_closed_snapshot = self.trades_closed
+
+                # Reload config so any auto-tuned values take effect immediately
+                try:
+                    import importlib, config as cfg_module
+                    importlib.reload(cfg_module)
+                    from config import config as new_cfg
+                    logger.info(
+                        f"🔄 Config reloaded: conf={new_cfg.MIN_ENSEMBLE_CONFIDENCE} "
+                        f"SL={new_cfg.EARLY_STOP_LOSS_PCT} TP={new_cfg.TAKE_PROFIT_PCT}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Config reload failed: {e}")
 
             except asyncio.CancelledError:
                 logger.info("🔁 Periodic self-improvement loop cancelled.")
                 break
             except Exception as e:
-                logger.error(f"Periodic review error: {e}", exc_info=True)
-                await asyncio.sleep(120)  # Back off on error
+                logger.error(f"Periodic review loop error: {e}", exc_info=True)
+                await asyncio.sleep(30)   # short backoff, then retry
 
     async def run_loop(self):
         logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max)...")

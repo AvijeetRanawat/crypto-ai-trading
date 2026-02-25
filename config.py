@@ -33,7 +33,7 @@ class Config:
 
     # ── Periodic Self-Improvement ──
     PERIODIC_REVIEW_TRADES = 5     # Trigger a mini-review every 5 closed trades
-    PERIODIC_REVIEW_SECONDS = 900  # Also review every 15 min (with >=3 new trades)
+    PERIODIC_REVIEW_SECONDS = 600  # Also review every 10 min if any new trades
 
     # ── Position Sizing ──
     MAX_POSITION_SIZE_INR = 20000
