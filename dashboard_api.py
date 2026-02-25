@@ -160,10 +160,13 @@ async def get_market_history(symbol: str = "BTCUSDT"):
 
 @app.get("/api/lessons")
 async def get_lessons():
-    """Most recent lessons (lifetime — lessons carry over across sessions)."""
+    """Current-session lessons only. All lessons are retained in DB for long-term learning."""
     conn = _db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT 15")
+    cur.execute(
+        "SELECT * FROM lessons WHERE timestamp >= ? ORDER BY id DESC LIMIT 20",
+        (SESSION_START,)
+    )
     rows = cur.fetchall()
     conn.close()
     return [
