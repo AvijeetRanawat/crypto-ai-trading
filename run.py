@@ -17,6 +17,15 @@ def start_agent_loop():
     asyncio.run(run_agent())
 
 if __name__ == "__main__":
+    # ── Clear log on every restart ──
+    from datetime import datetime
+    import os
+    log_path = os.path.join(os.path.dirname(__file__), "trading.log")
+    with open(log_path, "w") as f:
+        f.write(f"=== Session started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    print(f"🗑  Log cleared. Fresh session starting...")
+
+
     p1 = multiprocessing.Process(target=run_dashboard)
     p2 = multiprocessing.Process(target=start_agent_loop)
     
