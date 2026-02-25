@@ -16,11 +16,11 @@ class Config:
     # ── Confidence & Risk Gates ──
     MIN_ENSEMBLE_CONFIDENCE = 0.42   # Auto-tuned 14:53
     ALGO_SIGNAL_THRESHOLD = 0.10
-    EARLY_STOP_LOSS_PCT = 0.002   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20      # Auto-tuned 14:53
+    EARLY_STOP_LOSS_PCT = 0.004   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20      # Auto-tuned 14:53
     LLM_POLL_INTERVAL_SECONDS = 10   # Call Claude every 10s
 
     # ── Dynamic Exit Strategy ──
-    TAKE_PROFIT_PCT = 0.006   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20          # Auto-tuned 14:53
+    TAKE_PROFIT_PCT = 0.006   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20          # Auto-tuned 14:53
     TRAILING_STOP_TRIGGER_PCT = 0.003  # At +0.3% profit, activate trailing stop
     TRAILING_STOP_OFFSET_PCT = 0.002   # Trail by 0.2% from peak
 
