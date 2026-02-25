@@ -812,12 +812,12 @@ class SessionTimeFilter:
             session = "ASIA"
             quality = "MODERATE"
             confidence_multiplier = 1.00
-            min_pro_signals = 3  # require slightly more conviction
+            min_pro_signals = 2
         else:
             session = "OFF_HOURS"
             quality = "LOW"
             confidence_multiplier = 0.90   # Raise effective bar during off-hours
-            min_pro_signals = 4  # Very selective in dead hours
+            min_pro_signals = 2  # Quality controlled by confidence floor, not signal count
 
         return {
             "session": session,

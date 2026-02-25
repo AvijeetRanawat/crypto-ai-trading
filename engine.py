@@ -454,10 +454,9 @@ class TradingEngine:
                                                   bb_result['position_pct'], 'SKIPPED')
                             continue
 
-                        # ── Fix 4: SHORT requires 3+ sell signals ──────────
-                        # SHORTs at 2 signals had 35.8% WR, losing -₹4,293
-                        # LONGs at 2+ are profitable, keep as-is
-                        if sell_count >= 3 and sell_count > buy_count:
+                        # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
+                        # Quality enforced by confidence floor (0.70) + duplicate blocker (120s)
+                        if sell_count >= 2 and sell_count > buy_count:
                             proposed_dir = "SHORT"
                         elif buy_count >= 2 and buy_count >= sell_count:
                             proposed_dir = "LONG"
