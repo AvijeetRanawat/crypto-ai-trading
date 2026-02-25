@@ -133,6 +133,7 @@ class TradingEngine:
         self.missed_opportunities_count = 0
         self.last_entry_prices: dict = {}      # symbol -> (price, side, timestamp)
         self.direction_block: dict = {}         # symbol -> {side, blocked_until}
+        self.last_close_time = None             # Fix 5: post-close cooldown
         
         logger.info(f"Engine v5 ready. Watching: {config.BLUE_CHIP_WHITELIST}")
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
@@ -165,6 +166,7 @@ class TradingEngine:
             self.total_session_pnl += trade_result["pnl"]
             self.trades_closed += 1
             self.session_tracker.record_trade(trade_result["pnl"])
+            self.last_close_time = datetime.now()  # Fix 5: record close time for cooldown
 
             # ── Record for duplicate-entry guard ──
             self.last_entry_prices[symbol] = (
@@ -367,24 +369,28 @@ class TradingEngine:
                                     pos["pyramid_count"] = pyramid_count + 1
                                     logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ₹{add_inr:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
 
+                    # ── Fix 3: MINIMUM HOLD TIME (45s) ────────────────────
+                    # Trades held <30s had 13% WR — pure noise. Force 45s minimum.
+                    min_hold_met = hold_secs >= 45
+
                     # ── TAKE PROFIT ──
-                    if pnl_pct >= tp_pct:
+                    if min_hold_met and pnl_pct >= tp_pct:
                         await self._close_trade(symbol, current_price, f"✅ Take-Profit ({pnl_pct*100:+.3f}%)")
                         continue
 
                     # ── TRAILING STOP ──
-                    if pos["trailing_active"]:
+                    if min_hold_met and pos["trailing_active"]:
                         trail_stop = pos["peak_pnl_pct"] - config.TRAILING_STOP_OFFSET_PCT
                         if pnl_pct < trail_stop:
                             await self._close_trade(symbol, current_price, f"📉 Trailing Stop (peak: {pos['peak_pnl_pct']*100:+.3f}% → now: {pnl_pct*100:+.3f}%)")
                             continue
 
                     # ── EARLY STOP-LOSS ──
-                    if pnl_pct < -sl_pct:
+                    if min_hold_met and pnl_pct < -sl_pct:
                         await self._close_trade(symbol, current_price, f"⛔ Stop-Loss ({pnl_pct*100:.3f}%)")
                         continue
 
-                    # ── TIME EXIT ──
+                    # ── TIME EXIT (always applies, ignores min hold) ──
                     if hold_secs >= config.MANDATORY_EXIT_SECONDS:
                         await self._close_trade(symbol, current_price, f"⏰ Time Exit ({config.MANDATORY_EXIT_SECONDS}s)")
                         continue
@@ -448,7 +454,16 @@ class TradingEngine:
                                                   bb_result['position_pct'], 'SKIPPED')
                             continue
 
-                        proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
+                        # ── Fix 4: SHORT requires 3+ sell signals ──────────
+                        # SHORTs at 2 signals had 35.8% WR, losing -₹4,293
+                        # LONGs at 2+ are profitable, keep as-is
+                        if sell_count >= 3 and sell_count > buy_count:
+                            proposed_dir = "SHORT"
+                        elif buy_count >= 2 and buy_count >= sell_count:
+                            proposed_dir = "LONG"
+                        else:
+                            self.skipped_cycles += 1
+                            continue  # Not enough signals for either direction
 
                         # ── v6: MARKET REGIME FILTER ───────────────────────
                         regime_result = MarketRegimeDetector.analyze(history)
@@ -497,13 +512,28 @@ class TradingEngine:
                             update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
                             continue
 
-                        # ── DUPLICATE ENTRY GUARD ────────────────────────────
+                        # ── Fix 5: POST-CLOSE COOLDOWN (60s) ───────────────
+                        if self.last_close_time and (now - self.last_close_time).total_seconds() < 60:
+                            remaining_cd = 60 - int((now - self.last_close_time).total_seconds())
+                            if self.skipped_cycles % 3 == 0:
+                                update_intent(f"⏸ Post-close cooldown: {remaining_cd}s remaining", [symbol])
+                            continue
+
+                        # ── Fix 1: HARD DUPLICATE BLOCKER ──────────────────
+                        # Old: ₹500 threshold (0.008% of BTC = useless). 140 dupes lost ₹1,428.
+                        # New: 120s lockout + 0.15% relative price threshold
                         last_entry = self.last_entry_prices.get(symbol)
                         if last_entry:
                             last_price, last_side, last_time = last_entry
                             time_since = (now - last_time).total_seconds()
-                            if time_since < 300 and last_side == proposed_dir and abs(current_price - last_price) < 500:
-                                update_intent(f"⏸ Duplicate blocked: {proposed_dir} @ ₹{current_price:,.0f} near last @ ₹{last_price:,.0f}", [symbol])
+                            price_diff_pct = abs(current_price - last_price) / last_price
+                            # Hard time lock: no entry within 120s of last entry (any direction)
+                            if time_since < 120:
+                                update_intent(f"⏸ Entry blocked: {int(120 - time_since)}s lockout remaining", [symbol])
+                                continue
+                            # Same-direction price proximity: block if within 0.15%
+                            if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 600:
+                                update_intent(f"⏸ Duplicate blocked: {proposed_dir} only {price_diff_pct*100:.3f}% from last entry", [symbol])
                                 continue
 
                         # ── ALL TOOLS FOR CLAUDE ────────────────────────────
@@ -568,12 +598,19 @@ class TradingEngine:
                         # ── EFFECTIVE CONFIDENCE: session-adjusted ─────────
                         effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
 
-                        if not llm_signal or llm_signal.action == "NEUTRAL" or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE:
+                        # ── Fix 2: CONFIDENCE FLOOR = 0.70 ────────────────
+                        # Below 0.70: 202 trades at 28-36% WR, lost ₹3,583 total
+                        CONFIDENCE_FLOOR = 0.70
+
+                        if not llm_signal or llm_signal.action == "NEUTRAL" or llm_signal.confidence < CONFIDENCE_FLOOR or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE:
                             self.skipped_cycles += 1
                             conf = llm_signal.confidence if llm_signal else 0
                             action = llm_signal.action if llm_signal else "NEUTRAL"
+                            reject_reason = ""
+                            if llm_signal and llm_signal.confidence < CONFIDENCE_FLOOR and llm_signal.action != "NEUTRAL":
+                                reject_reason = f" | 🚫 CONF FLOOR: {conf:.2f} < {CONFIDENCE_FLOOR}"
                             if self.skipped_cycles % 3 == 1:
-                                update_intent(f"⏳ Claude passed (raw:{conf:.2f} adj:{effective_conf:.2f}). Skipped {self.skipped_cycles}x", [symbol])
+                                update_intent(f"⏳ Claude passed (raw:{conf:.2f} adj:{effective_conf:.2f}){reject_reason}. Skipped {self.skipped_cycles}x", [symbol])
                             save_signal_event(symbol, current_price, buy_count, sell_count,
                                               rsi_result['rsi'], macd_result['crossover'],
                                               bb_result['position_pct'], 'MISSED',
