@@ -29,7 +29,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
-            balance_inr REAL,
+            balance_usdt REAL,
             open_positions_count INTEGER
         )
     ''')
@@ -127,7 +127,7 @@ def save_portfolio_snapshot(balance, positions_count):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO portfolio (timestamp, balance_inr, open_positions_count)
+        INSERT INTO portfolio (timestamp, balance_usdt, open_positions_count)
         VALUES (?, ?, ?)
     ''', (datetime.now().isoformat(), balance, positions_count))
     conn.commit()
