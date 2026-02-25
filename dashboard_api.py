@@ -17,8 +17,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Session start time (used for "fresh start" clearing on restart) ──────────
+# ── Session start time — set once when this process boots ────────────────────
 SESSION_START = datetime.utcnow().isoformat()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _db():
+    conn = sqlite3.connect(database.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Core endpoints
@@ -32,72 +41,112 @@ async def session_start():
 
 @app.get("/api/trades/recent")
 async def get_trades():
-    trades = database.get_recent_trades(limit=30)
+    """Return only trades from the current session."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
+        FROM trades
+        WHERE status='CLOSED' AND entry_time >= ?
+        ORDER BY id DESC LIMIT 50
+    """, (SESSION_START,))
+    rows = cur.fetchall()
+    conn.close()
     return [
         {
-            "id": t[0], "symbol": t[1], "side": t[2], "price": t[3],
-            "quantity": t[4], "entry_time": t[5], "exit_time": t[6],
-            "reason": t[7], "pnl": t[8], "status": t[9]
-        } for t in trades
+            "id": r[0], "symbol": r[1], "side": r[2], "price": r[3],
+            "quantity": r[4], "entry_time": r[5], "exit_time": r[6],
+            "reason": r[7], "pnl": r[8], "status": r[9]
+        } for r in rows
     ]
 
 
 @app.get("/api/portfolio/history")
 async def get_portfolio():
-    history = database.get_portfolio_history(limit=200)
-    return [
-        {"id": h[0], "timestamp": h[1], "balance": h[2], "positions": h[3]}
-        for h in history
-    ]
+    """Equity curve — session only."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, timestamp, balance, positions
+        FROM portfolio
+        WHERE timestamp >= ?
+        ORDER BY id ASC LIMIT 300
+    """, (SESSION_START,))
+    rows = cur.fetchall()
+    conn.close()
+    return [{"id": r[0], "timestamp": r[1], "balance": r[2], "positions": r[3]} for r in rows]
 
 
 @app.get("/api/portfolio/summary")
 async def get_portfolio_summary():
-    """Aggregated stats: balance, total PnL, win rate, open position."""
-    trades = database.get_recent_trades(limit=500)
-    closed = [t for t in trades if t[9] == "CLOSED"]
+    """Aggregated session stats: PnL, win rate, open position."""
+    conn = _db()
+    cur = conn.cursor()
+
+    # Session closed trades
+    cur.execute("""
+        SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
+        FROM trades WHERE status='CLOSED' AND entry_time >= ?
+    """, (SESSION_START,))
+    closed = cur.fetchall()
+
     wins = [t for t in closed if (t[8] or 0) > 0]
     total_pnl = sum(t[8] or 0 for t in closed)
     win_rate = (len(wins) / len(closed) * 100) if closed else 0
-    missed_count = 0
-    try:
-        conn = sqlite3.connect(database.DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM signal_events WHERE outcome='MISSED'")
-        missed_count = cur.fetchone()[0]
-        conn.close()
-    except Exception:
-        pass
-    open_pos = next((t for t in trades if t[9] == "OPEN"), None)
+
+    # Missed signals this session
+    cur.execute("""
+        SELECT COUNT(*) FROM signal_events
+        WHERE outcome='MISSED' AND timestamp >= ?
+    """, (SESSION_START,))
+    missed_count = cur.fetchone()[0]
+
+    # Open position
+    cur.execute("""
+        SELECT symbol, side, price, entry_time FROM trades
+        WHERE status='OPEN' ORDER BY id DESC LIMIT 1
+    """)
+    open_pos = cur.fetchone()
+    conn.close()
+
     return {
         "total_pnl": round(total_pnl, 2),
         "win_rate": round(win_rate, 1),
         "total_trades": len(closed),
         "missed_count": missed_count,
         "open_position": {
-            "symbol": open_pos[1], "side": open_pos[2],
-            "entry_price": open_pos[3], "entry_time": open_pos[5]
+            "symbol": open_pos[0], "side": open_pos[1],
+            "entry_price": open_pos[2], "entry_time": open_pos[3]
         } if open_pos else None,
     }
 
 
 @app.get("/api/market/history")
 async def get_market_history(symbol: str = "BTCINR"):
-    history = database.get_price_history(symbol, limit=300)
-    return [{"timestamp": h[0], "price": h[1]} for h in reversed(history)]
+    """Price chart — session only."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT timestamp, price FROM prices
+        WHERE symbol=? AND timestamp >= ?
+        ORDER BY timestamp ASC LIMIT 500
+    """, (symbol, SESSION_START))
+    rows = cur.fetchall()
+    conn.close()
+    return [{"timestamp": r[0], "price": r[1]} for r in rows]
 
 
 @app.get("/api/lessons")
 async def get_lessons():
-    conn = sqlite3.connect(database.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT 15")
-    lessons = cursor.fetchall()
+    """Most recent lessons (lifetime — lessons carry over across sessions)."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT 15")
+    rows = cur.fetchall()
     conn.close()
     return [
-        {"id": l[0], "timestamp": l[1], "condition": l[2],
-         "lesson": l[3], "severity": l[4]}
-        for l in lessons
+        {"id": r[0], "timestamp": r[1], "condition": r[2], "lesson": r[3], "severity": r[4]}
+        for r in rows
     ]
 
 
@@ -117,18 +166,10 @@ async def get_intent():
 
 
 @app.get("/api/logs")
-async def get_logs(lines: int = 50):
-    """Read from the consolidated trading.log file."""
+async def get_logs(lines: int = 60):
+    """Read from the consolidated trading.log file (cleared on restart)."""
     log_path = os.path.join(os.path.dirname(__file__), "trading.log")
     if not os.path.exists(log_path):
-        # Fallback: try any timestamped log
-        import glob
-        candidates = sorted(glob.glob(os.path.join(
-            os.path.dirname(__file__), "trading_log_*.log"
-        )), key=os.path.getmtime, reverse=True)
-        log_path = candidates[0] if candidates else None
-
-    if not log_path:
         return {"logs": ["No log file found. Start the trading engine first."]}
     try:
         with open(log_path, "r") as f:
@@ -140,7 +181,17 @@ async def get_logs(lines: int = 50):
 
 @app.get("/api/signals/history")
 async def get_signals_history(symbol: str = "BTCINR", limit: int = 200):
-    rows = database.get_signal_history(symbol, limit=limit)
+    """Signal events — session only."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT timestamp, price, buy_votes, sell_votes, rsi, macd, bb_pct, outcome, claude_action, claude_conf
+        FROM signal_events
+        WHERE symbol=? AND timestamp >= ?
+        ORDER BY id DESC LIMIT ?
+    """, (symbol, SESSION_START, limit))
+    rows = cur.fetchall()
+    conn.close()
     return [
         {
             "timestamp": r[0], "price": r[1],
@@ -157,7 +208,6 @@ async def get_regime():
     """Run regime/ATR/session snapshot from latest prices in DB."""
     from strategies.tools import MarketRegimeDetector, ATRTracker, SessionTimeFilter
 
-    # Session filter doesn't need price data
     session = SessionTimeFilter.analyze()
 
     try:
@@ -180,8 +230,8 @@ async def get_regime():
     if len(rows) < 30:
         return {
             "regime": "WARMING_UP", "strength": 0,
-            "verdict": f"Warming up ({len(rows)}/60 prices collected)",
-            "atr_sl": 0.003, "atr_tp": 0.006, "atr_verdict": "ATR: warming up",
+            "verdict": f"Warming up ({len(rows)}/30 prices collected)",
+            "atr_sl": 0.004, "atr_tp": 0.008, "atr_verdict": "ATR: warming up",
             "session": session["session"],
             "session_quality": session["quality"],
             "session_verdict": session["verdict"],
