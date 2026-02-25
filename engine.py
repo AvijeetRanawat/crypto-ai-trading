@@ -16,6 +16,7 @@ from strategies.tools import (
     VolatilityScanner, PriceVelocity, VolumeProfile, OrderBookPressure, SessionTracker,
     RSIAnalyzer, MACDSignal, BollingerBands, SupportResistance, CandlePatterns,
     MarketRegimeDetector, ATRTracker, MultiTimeframeConfirmer, SessionTimeFilter,
+    StochasticRSI, EMACross, VolumeMomentum,
 )
 import sys
 
@@ -139,14 +140,16 @@ class TradingEngine:
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
         logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
 
-    def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result) -> tuple:
-        """Count how many pro tools are giving a BUY or SELL signal."""
+    def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result,
+                            stochrsi_result=None, ema_result=None, volmom_result=None) -> tuple:
+        """Count how many pro tools give a BUY or SELL signal (up to 8 voters)."""
         buy_count = 0
         sell_count = 0
-        
+
         buy_signals  = {"STRONG_BUY", "BUY", "BULLISH_CROSS", "BULLISH_ENGULFING", "HAMMER"}
         sell_signals = {"STRONG_SELL", "SELL", "BEARISH_CROSS", "BEARISH_ENGULFING", "SHOOTING_STAR"}
-        
+
+        # Original 5 voters
         for sig in [rsi_result.get("signal"), macd_result.get("crossover"), bb_result.get("signal")]:
             if sig in buy_signals: buy_count += 1
             elif sig in sell_signals: sell_count += 1
@@ -156,6 +159,22 @@ class TradingEngine:
 
         if candle_result.get("signal") == "BUY": buy_count += 1
         elif candle_result.get("signal") == "SELL": sell_count += 1
+
+        # 3 new voters (v7)
+        if stochrsi_result:
+            sig = stochrsi_result.get("signal")
+            if sig in buy_signals: buy_count += 1
+            elif sig in sell_signals: sell_count += 1
+
+        if ema_result:
+            sig = ema_result.get("signal")
+            if sig in buy_signals: buy_count += 1
+            elif sig in sell_signals: sell_count += 1
+
+        if volmom_result:
+            sig = volmom_result.get("signal")
+            if sig in buy_signals: buy_count += 1
+            elif sig in sell_signals: sell_count += 1
 
         return buy_count, sell_count
 
@@ -434,9 +453,14 @@ class TradingEngine:
                         bb_result     = BollingerBands.analyze(history, current_price)
                         sr_result     = SupportResistance.analyze(history, current_price)
                         candle_result = CandlePatterns.analyze(history)
+                        # v7 new voters
+                        stochrsi_result = StochasticRSI.analyze(history)
+                        ema_result      = EMACross.analyze(history)
+                        volmom_result   = VolumeMomentum.analyze(history)
 
                         buy_count, sell_count = self._count_pro_signals(
-                            rsi_result, macd_result, bb_result, sr_result, candle_result
+                            rsi_result, macd_result, bb_result, sr_result, candle_result,
+                            stochrsi_result, ema_result, volmom_result
                         )
 
                         # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
@@ -499,7 +523,7 @@ class TradingEngine:
                             wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
                             if self.skipped_cycles % 2 == 0:
                                 update_intent(
-                                    f"⚡ SETUP: {proposed_dir} ({buy_count if proposed_dir=='LONG' else sell_count}/5) | {regime} | LLM in {wait_left}s...",
+                                    f"⚡ SETUP: {proposed_dir} ({buy_count if proposed_dir=='LONG' else sell_count}/8) | {regime} | LLM in {wait_left}s...",
                                     [symbol]
                                 )
                             continue
@@ -567,6 +591,12 @@ class TradingEngine:
                              "data": sr_result['verdict'], "signal": sr_result.get("signal", "NEUTRAL")},
                             {"name": "Candle Patterns",
                              "data": candle_result['verdict'], "signal": candle_result["signal"]},
+                             {"name": "Stochastic RSI",
+                              "data": stochrsi_result["verdict"], "signal": stochrsi_result["signal"]},
+                             {"name": "EMA Cross (9/21)",
+                              "data": ema_result["verdict"], "signal": ema_result["signal"]},
+                             {"name": "Volume Momentum",
+                              "data": volmom_result["verdict"], "signal": volmom_result["signal"]},
                         ]
                         for agent in self.algo_agents:
                             sig = agent.analyze(symbol, current_price, history, meta)

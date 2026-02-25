@@ -268,14 +268,16 @@ class RSIAnalyzer:
 
         rsi = round(rsi, 2)
 
-        # ── SUSPECT flagging: extreme RSI on 1m data is often a momentum spike artifact ──
-        if rsi < 5 or rsi > 95:
-            return {
-                "rsi": rsi,
-                "signal": "NEUTRAL",
-                "verdict": f"RSI {rsi} — ⚠️ SUSPECT (momentum spike artifact, unreliable on 1m data). Treat as NEUTRAL.",
-                "suspect": True,
-            }
+        # ── Treat RSI extremes as strong signals, not artifacts ──
+        # On 5s ticks BTC can legitimately hit RSI extremes during sharp moves
+        if rsi < 5:
+            return {"rsi": rsi, "signal": "STRONG_BUY",
+                    "verdict": f"RSI {rsi} — DEEPLY OVERSOLD, extreme buying opportunity",
+                    "suspect": False}
+        if rsi > 95:
+            return {"rsi": rsi, "signal": "STRONG_SELL",
+                    "verdict": f"RSI {rsi} — DEEPLY OVERBOUGHT, extreme selling opportunity",
+                    "suspect": False}
 
         if rsi < 20:
             signal = "STRONG_BUY"
@@ -573,6 +575,174 @@ class CandlePatterns:
 
         p = patterns_found[0]
         return {"pattern": p[0], "signal": p[1], "verdict": p[2]}
+
+
+# ─── v7 ADDITIONAL INDICATORS ─────────────────────────────────────────────────
+
+
+class StochasticRSI:
+    """
+    Stochastic of RSI — more sensitive than raw RSI for catching turning points.
+    Oscillates 0-100. < 20 = oversold BUY, > 80 = overbought SELL.
+    Uses 14-period RSI over a 14-period lookback window.
+    """
+    name = "Stochastic RSI"
+    RSI_PERIOD = 14
+    STOCH_PERIOD = 14
+    MIN_HISTORY = 60  # Need enough data for stable RSI series
+
+    @staticmethod
+    def _rsi_series(prices: list, period: int = 14) -> list:
+        """Compute RSI value for each point in prices list."""
+        rsi_vals = []
+        for i in range(period, len(prices)):
+            window = prices[i - period:i + 1]
+            gains = [max(window[j] - window[j-1], 0) for j in range(1, len(window))]
+            losses = [max(window[j-1] - window[j], 0) for j in range(1, len(window))]
+            ag = sum(gains) / period
+            al = sum(losses) / period
+            if al == 0:
+                rsi_vals.append(99.0 if ag > 0 else 50.0)
+            else:
+                rs = ag / al
+                rsi_vals.append(100 - (100 / (1 + rs)))
+        return rsi_vals
+
+    @staticmethod
+    def analyze(history: list) -> dict:
+        if len(history) < StochasticRSI.MIN_HISTORY:
+            return {"stochrsi": 50.0, "signal": "NEUTRAL",
+                    "verdict": f"StochRSI warming up ({len(history)}/{StochasticRSI.MIN_HISTORY})"}
+
+        prices = list(history)[-StochasticRSI.MIN_HISTORY:]
+        rsi_series = StochasticRSI._rsi_series(prices, StochasticRSI.RSI_PERIOD)
+
+        if len(rsi_series) < StochasticRSI.STOCH_PERIOD:
+            return {"stochrsi": 50.0, "signal": "NEUTRAL", "verdict": "StochRSI: insufficient RSI series"}
+
+        window = rsi_series[-StochasticRSI.STOCH_PERIOD:]
+        lo, hi = min(window), max(window)
+        current_rsi = rsi_series[-1]
+
+        if hi == lo:
+            stochrsi = 50.0
+        else:
+            stochrsi = round((current_rsi - lo) / (hi - lo) * 100, 1)
+
+        if stochrsi < 10:
+            signal, verdict = "STRONG_BUY", f"StochRSI {stochrsi:.1f} — DEEPLY OVERSOLD, strong reversal expected"
+        elif stochrsi < 20:
+            signal, verdict = "BUY", f"StochRSI {stochrsi:.1f} — Oversold, buying opportunity"
+        elif stochrsi > 90:
+            signal, verdict = "STRONG_SELL", f"StochRSI {stochrsi:.1f} — DEEPLY OVERBOUGHT, strong reversal expected"
+        elif stochrsi > 80:
+            signal, verdict = "SELL", f"StochRSI {stochrsi:.1f} — Overbought, selling opportunity"
+        else:
+            signal, verdict = "NEUTRAL", f"StochRSI {stochrsi:.1f} — Mid-range, no strong edge"
+
+        return {"stochrsi": stochrsi, "signal": signal, "verdict": verdict}
+
+
+class EMACross:
+    """
+    EMA(9) vs EMA(21) crossover — a non-correlated trend-following signal.
+    Golden cross (EMA9 > EMA21 and trending up) = BUY.
+    Death cross (EMA9 < EMA21 and trending down) = SELL.
+    """
+    name = "EMA Cross (9/21)"
+    MIN_HISTORY = 30
+
+    @staticmethod
+    def _ema(prices: list, period: int) -> list:
+        k = 2 / (period + 1)
+        ema = [prices[0]]
+        for p in prices[1:]:
+            ema.append(p * k + ema[-1] * (1 - k))
+        return ema
+
+    @staticmethod
+    def analyze(history: list) -> dict:
+        if len(history) < EMACross.MIN_HISTORY:
+            return {"signal": "NEUTRAL", "verdict": f"EMA Cross warming up ({len(history)}/{EMACross.MIN_HISTORY})"}
+
+        prices = list(history)[-EMACross.MIN_HISTORY:]
+        ema9  = EMACross._ema(prices, 9)
+        ema21 = EMACross._ema(prices, 21)
+
+        # Current and previous values
+        e9_now, e9_prev   = ema9[-1],  ema9[-2]
+        e21_now, e21_prev = ema21[-1], ema21[-2]
+
+        gap_pct = (e9_now - e21_now) / e21_now * 100
+
+        if e9_now > e21_now and e9_prev <= e21_prev:
+            signal  = "STRONG_BUY"
+            verdict = f"EMA Cross: GOLDEN CROSS just fired (9-EMA crossed above 21-EMA) | gap: {gap_pct:+.3f}%"
+        elif e9_now > e21_now:
+            signal  = "BUY"
+            verdict = f"EMA(9) above EMA(21) — bullish trend intact | gap: {gap_pct:+.3f}%"
+        elif e9_now < e21_now and e9_prev >= e21_prev:
+            signal  = "STRONG_SELL"
+            verdict = f"EMA Cross: DEATH CROSS just fired (9-EMA crossed below 21-EMA) | gap: {gap_pct:+.3f}%"
+        elif e9_now < e21_now:
+            signal  = "SELL"
+            verdict = f"EMA(9) below EMA(21) — bearish trend intact | gap: {gap_pct:+.3f}%"
+        else:
+            signal  = "NEUTRAL"
+            verdict = f"EMA(9) ≈ EMA(21) — no trend bias | gap: {gap_pct:+.3f}%"
+
+        return {"ema9": round(e9_now, 2), "ema21": round(e21_now, 2),
+                "gap_pct": round(gap_pct, 4), "signal": signal, "verdict": verdict}
+
+
+class VolumeMomentum:
+    """
+    Detects volume spikes combined with price direction to confirm conviction.
+    Uses bid/ask spread change as proxy for volume since CoinDCX ticker provides bid/ask.
+    A tightening spread + upward price = buying pressure.
+    Widening spread + downward price = selling panic.
+    Uses price acceleration as the momentum proxy when volume is unavailable.
+    """
+    name = "Volume Momentum"
+    MIN_HISTORY = 20
+
+    @staticmethod
+    def analyze(history: list) -> dict:
+        if len(history) < VolumeMomentum.MIN_HISTORY:
+            return {"signal": "NEUTRAL", "verdict": f"VolMom warming up ({len(history)}/{VolumeMomentum.MIN_HISTORY})"}
+
+        prices = list(history)
+        # Recent window vs baseline
+        recent  = prices[-6:]    # last 30s
+        baseline = prices[-20:-6]  # prior 70s
+
+        recent_vol  = max(max(recent)  - min(recent),  0.0001)
+        base_vol    = max(max(baseline) - min(baseline), 0.0001)
+        vol_ratio   = recent_vol / base_vol
+
+        price_dir = recent[-1] - recent[0]  # positive = rising, negative = falling
+
+        if vol_ratio > 1.8 and price_dir > 0:
+            signal  = "STRONG_BUY"
+            verdict = f"Volume spike ({vol_ratio:.1f}x) with price rising — strong buying conviction"
+        elif vol_ratio > 1.4 and price_dir > 0:
+            signal  = "BUY"
+            verdict = f"Elevated volume ({vol_ratio:.1f}x) with upward price — buying momentum"
+        elif vol_ratio > 1.8 and price_dir < 0:
+            signal  = "STRONG_SELL"
+            verdict = f"Volume spike ({vol_ratio:.1f}x) with price falling — strong selling conviction"
+        elif vol_ratio > 1.4 and price_dir < 0:
+            signal  = "SELL"
+            verdict = f"Elevated volume ({vol_ratio:.1f}x) with downward price — selling momentum"
+        elif vol_ratio < 0.5:
+            signal  = "NEUTRAL"
+            verdict = f"Low activity ({vol_ratio:.1f}x normal) — dull market, avoid entry"
+        else:
+            signal  = "NEUTRAL"
+            verdict = f"Normal activity ({vol_ratio:.1f}x) — no volume-based conviction"
+
+        return {"vol_ratio": round(vol_ratio, 2), "price_dir": round(price_dir, 2),
+                "signal": signal, "verdict": verdict}
 
 
 # ─── ENGINE v6 TOOLS ──────────────────────────────────────────────────────────

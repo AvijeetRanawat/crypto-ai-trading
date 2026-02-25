@@ -60,16 +60,37 @@ class LLMAgent(BaseStrategy):
             self.bedrock = None
 
     def _build_lessons_context(self):
-        lessons = get_recent_lessons(limit=8)
+        lessons = get_recent_lessons(limit=12)
         if not lessons:
             return ""
 
-        lines = []
-        for i, (condition, lesson, severity) in enumerate(lessons, 1):
-            emoji = "🏆" if severity == "GOLDEN" else ("✅" if severity == "WIN" else "❌")
-            lines.append(f"  {i}. {emoji} [{severity}] {condition} → {lesson}")
+        # Split into SELF_CRITIQUE (hard behavioural overrides) vs general lessons
+        critiques = [(c, l, s) for c, l, s in lessons if s == "SELF_CRITIQUE"]
+        others    = [(c, l, s) for c, l, s in lessons if s != "SELF_CRITIQUE"]
 
-        return "\n<PAST_LESSONS>\n" + "\n".join(lines) + "\n</PAST_LESSONS>\n"
+        parts = []
+
+        # Inject top-3 self-critiques as hard rules Claude must follow
+        if critiques:
+            rules = []
+            for c, l, _ in critiques[:3]:
+                # Extract the Adj: clause which contains the concrete rule
+                adj_start = l.find("| Adj:")
+                rule = l[adj_start + 7:].strip() if adj_start >= 0 else l[:120]
+                rules.append(f"  - {rule}")
+            parts.append("\n<HARD_RULES — you MUST follow these, do NOT return NEUTRAL if conditions match>\n"
+                         + "\n".join(rules)
+                         + "\n</HARD_RULES>\n")
+
+        # General lessons
+        if others:
+            lines = []
+            for i, (condition, lesson, severity) in enumerate(others[:6], 1):
+                emoji = "🏆" if severity == "GOLDEN" else ("✅" if severity == "WIN" else "❌")
+                lines.append(f"  {i}. {emoji} [{severity}] {condition[:80]} → {lesson[:120]}")
+            parts.append("\n<PAST_LESSONS>\n" + "\n".join(lines) + "\n</PAST_LESSONS>\n")
+
+        return "".join(parts)
 
     def _haiku_gate(self, buy_votes: int, sell_votes: int, rsi: float,
                     macd: str, bb_pct: float, regime: str) -> bool:
