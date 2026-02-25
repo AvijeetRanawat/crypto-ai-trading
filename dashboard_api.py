@@ -39,6 +39,28 @@ async def session_start():
     return {"session_start": SESSION_START}
 
 
+@app.get("/api/warmup")
+async def get_warmup():
+    """Return warmup progress: how many price ticks collected vs the 35 needed."""
+    MIN_TICKS = 35
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM prices WHERE symbol='BTCUSDT' AND timestamp >= ?",
+        (SESSION_START,)
+    )
+    ticks = cur.fetchone()[0]
+    conn.close()
+    done = ticks >= MIN_TICKS
+    return {
+        "ticks": min(ticks, MIN_TICKS),
+        "min_ticks": MIN_TICKS,
+        "pct": min(100, round(ticks / MIN_TICKS * 100)),
+        "done": done,
+        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 5),
+    }
+
+
 @app.get("/api/trades/recent")
 async def get_trades():
     """Return only trades from the current session."""

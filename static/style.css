@@ -823,3 +823,53 @@ body {
 .warn {
     color: var(--yellow);
 }
+/* ── Warmup Progress Bar ──────────────────────────────────────── */
+.warmup-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0 2px;
+}
+.warmup-track {
+    flex: 1;
+    height: 5px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 99px;
+    overflow: hidden;
+}
+.warmup-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #6366f1);
+    border-radius: 99px;
+    transition: width 0.5s ease;
+    box-shadow: 0 0 8px rgba(99,102,241,0.5);
+}
+.warmup-label {
+    font-size: 0.68rem;
+    color: #6366f1;
+    white-space: nowrap;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Trade Performance Chart ────────────────────────────────────── */
+.perf-summary {
+    font-size: 0.68rem;
+    font-family: 'JetBrains Mono', monospace;
+    margin-left: 8px;
+    font-weight: 500;
+}
+.perf-summary.positive { color: var(--green); }
+.perf-summary.negative { color: var(--red); }
+.perf-summary.neutral { color: #6b7280; }
+
+.perf-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    color: #4b5563;
+    pointer-events: none;
+}
+.equity-card { position: relative; }

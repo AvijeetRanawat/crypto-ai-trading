@@ -61,7 +61,7 @@ def _build_compact_report(trades, signals, lessons, label: str = "PERIODIC") -> 
     wr    = (len(wins) / total * 100) if total else 0
 
     trade_lines = [
-        f"  {'✅' if t[8]>0 else '❌'} {t[2]} {t[1]} @ ₹{t[3]:,.0f} → PnL: {'+'if t[8]>=0 else ''}₹{t[8]:.0f} | {t[7][:70]}"
+        f"  {'✅' if t[8]>0 else '❌'} {t[2]} {t[1]} @ ${t[3]:,.0f} → PnL: {'+'if t[8]>=0 else ''}${t[8]:.0f} | {t[7][:70]}"
         for t in trades[-20:]
     ]
 
@@ -75,7 +75,7 @@ def _build_compact_report(trades, signals, lessons, label: str = "PERIODIC") -> 
     return f"""
 {label} REVIEW — {datetime.now().strftime('%Y-%m-%d %H:%M')}
 {'='*55}
-Trades analyzed: {total} | Wins: {len(wins)} ({wr:.0f}%) | Losses: {len(losses)} | Net PnL: ₹{net:.0f}
+Trades analyzed: {total} | Wins: {len(wins)} ({wr:.0f}%) | Losses: {len(losses)} | Net PnL: ${net:.0f}
 
 RECENT TRADES:
 {chr(10).join(trade_lines) or '  (none yet)'}

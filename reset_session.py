@@ -54,12 +54,12 @@ def reset_session():
 
     logger.info(f"   ✅ Cleared: {trades_n} trades, {port_n} portfolio snapshots, {sig_n} signal events, {price_n} price ticks")
     logger.info(f"   ✅ Preserved: {lessons_n} lessons (all golden rules and self-critiques kept)")
-    logger.info("🆕 Session is RESET. Starting fresh with ₹1,00,000 balance and accumulated wisdom.")
+    logger.info("🆕 Session is RESET. Starting fresh with $1,250 balance and accumulated wisdom.")
     print()
     print("=" * 60)
     print("  SESSION RESET COMPLETE")
     print(f"  {lessons_n} lessons PRESERVED for next session")
-    print("  Balance reset to ₹1,00,000")
+    print("  Balance reset to $1,250")
     print("  Run: python3 run.py")
     print("=" * 60)
 
