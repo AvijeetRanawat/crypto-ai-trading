@@ -154,40 +154,56 @@ async def get_signals_history(symbol: str = "BTCINR", limit: int = 200):
 
 @app.get("/api/regime")
 async def get_regime():
-    """Run a quick regime snapshot from the last saved price history."""
+    """Run regime/ATR/session snapshot from latest prices in DB."""
+    from strategies.tools import MarketRegimeDetector, ATRTracker, SessionTimeFilter
+
+    # Session filter doesn't need price data
+    session = SessionTimeFilter.analyze()
+
     try:
         conn = sqlite3.connect(database.DB_PATH)
         cur = conn.cursor()
         cur.execute(
-            "SELECT price FROM price_history WHERE symbol='BTCINR' "
+            "SELECT price FROM prices WHERE symbol='BTCINR' "
             "ORDER BY timestamp DESC LIMIT 200"
         )
         rows = cur.fetchall()
         conn.close()
-        if len(rows) < 60:
-            return {"regime": "WARMING_UP", "strength": 0, "verdict": "Warming up..."}
-
-        from strategies.tools import MarketRegimeDetector, ATRTracker, SessionTimeFilter
-        prices = [r[0] for r in reversed(rows)]
-        regime = MarketRegimeDetector.analyze(prices)
-        atr    = ATRTracker.analyze(prices)
-        session = SessionTimeFilter.analyze()
+    except Exception as e:
         return {
-            "regime": regime["regime"],
-            "strength": regime["strength"],
-            "ema20": regime.get("ema20", 0),
-            "ema50": regime.get("ema50", 0),
-            "trade_direction": regime["trade_direction"],
-            "verdict": regime["verdict"],
-            "atr_sl": atr["stop_loss_pct"],
-            "atr_tp": atr["take_profit_pct"],
-            "atr_verdict": atr["verdict"],
+            "regime": "ERROR", "verdict": str(e),
             "session": session["session"],
             "session_quality": session["quality"],
             "session_verdict": session["verdict"],
         }
-    except Exception as e:
-        return {"regime": "ERROR", "verdict": str(e)}
+
+    if len(rows) < 30:
+        return {
+            "regime": "WARMING_UP", "strength": 0,
+            "verdict": f"Warming up ({len(rows)}/60 prices collected)",
+            "atr_sl": 0.003, "atr_tp": 0.006, "atr_verdict": "ATR: warming up",
+            "session": session["session"],
+            "session_quality": session["quality"],
+            "session_verdict": session["verdict"],
+        }
+
+    prices = [r[0] for r in reversed(rows)]
+    regime = MarketRegimeDetector.analyze(prices)
+    atr    = ATRTracker.analyze(prices)
+    return {
+        "regime":          regime["regime"],
+        "strength":        regime["strength"],
+        "ema20":           regime.get("ema20", 0),
+        "ema50":           regime.get("ema50", 0),
+        "trade_direction": regime["trade_direction"],
+        "verdict":         regime["verdict"],
+        "atr_sl":          atr["stop_loss_pct"],
+        "atr_tp":          atr["take_profit_pct"],
+        "atr_verdict":     atr["verdict"],
+        "session":         session["session"],
+        "session_quality": session["quality"],
+        "session_verdict": session["verdict"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
