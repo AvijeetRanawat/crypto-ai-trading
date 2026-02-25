@@ -83,8 +83,8 @@ function initCharts() {
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 const fmt = (n) => n >= 0
-    ? `+₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : `-₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    ? `+$${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `-$${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const fmtPct = (n) => (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
 
@@ -132,8 +132,8 @@ async function checkFreshStart() {
             el('trades-list').innerHTML = '<div class="empty-state">New session — no trades yet</div>';
             el('lessons-log').innerHTML = '';
             el('intent-display').textContent = 'New session starting...';
-            el('balance-val').textContent = '₹1,00,000';
-            el('total-profit-val').textContent = '+₹0.00';
+            el('balance-val').textContent = '$1,00,000';
+            el('total-profit-val').textContent = '+$0.00';
             el('win-rate-val').textContent = '--%';
             el('trades-count-val').textContent = '0';
             el('missed-count-val').textContent = '0';
@@ -153,7 +153,7 @@ function updateUptime() {
 // ── PRICE CHART ───────────────────────────────────────────────────────────────
 async function updatePriceChart() {
     try {
-        const res = await fetch(`${API}/market/history?symbol=BTCINR`);
+        const res = await fetch(`${API}/market/history?symbol=BTCUSDT`);
         const data = await res.json();
         if (!data.length || !chartsReady) return;
 
@@ -173,7 +173,7 @@ async function updatePriceChart() {
         const prev = data[Math.max(0, data.length - 12)]; // ~60s ago
         const change = ((latest.price - prev.price) / prev.price) * 100;
         const priceEl = el('current-price');
-        priceEl.textContent = `₹${latest.price.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+        priceEl.textContent = `$${latest.price.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
         flashUpdate(priceEl);
         const changeEl = el('price-change');
         changeEl.textContent = fmtPct(change);
@@ -196,15 +196,15 @@ async function updatePortfolioSummary() {
         el('trades-count-val').textContent = d.total_trades;
         el('missed-count-val').textContent = d.missed_count;
 
-        // Approximate balance (start ₹1L + total_pnl)
+        // Approximate balance (start $1L + total_pnl)
         const balance = 100000 + d.total_pnl;
-        el('balance-val').textContent = '₹' + balance.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        el('balance-val').textContent = '$' + balance.toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
         // Open position indicator
         const openEl = el('open-position');
         if (d.open_position) {
             const op = d.open_position;
-            openEl.textContent = `📈 ${op.side} ${op.symbol} @ ₹${op.entry_price?.toLocaleString('en-IN', { maximumFractionDigits: 0 }) ?? '—'}`;
+            openEl.textContent = `📈 ${op.side} ${op.symbol} @ $${op.entry_price?.toLocaleString('en-IN', { maximumFractionDigits: 0 }) ?? '—'}`;
             openEl.className = 'open-pos-badge ' + (op.side === 'LONG' ? 'positive' : 'negative');
         } else {
             openEl.textContent = 'No open position';
@@ -231,7 +231,7 @@ async function updateEquityCurve() {
 // ── SIGNALS ───────────────────────────────────────────────────────────────────
 async function updateSignals() {
     try {
-        const res = await fetch(`${API}/signals/history?symbol=BTCINR&limit=60`);
+        const res = await fetch(`${API}/signals/history?symbol=BTCUSDT&limit=60`);
         const data = await res.json();
         if (!data.length || !chartsReady) return;
 
@@ -318,7 +318,7 @@ async function updateTrades() {
             const time = t.entry_time ? t.entry_time.slice(11, 16) : '--:--';
             return `<div class="trade-row ${cls}">
                 <span class="trade-side ${t.side === 'LONG' ? 'buy' : 'sell'}">${sideIcon} ${t.side}</span>
-                <span class="trade-price">₹${(t.price || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                <span class="trade-price">$${(t.price || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
                 <span class="trade-pnl ${cls}">${pnl !== 0 ? fmt(pnl) : t.status}</span>
                 <span class="trade-time">${time}</span>
             </div>`;

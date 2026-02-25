@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+
 import database
 import sqlite3
 import os
@@ -67,7 +67,7 @@ async def get_portfolio():
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, timestamp, balance_inr, open_positions_count
+        SELECT id, timestamp, balance_usdt, open_positions_count
         FROM portfolio
         WHERE timestamp >= ?
         ORDER BY id ASC LIMIT 300
@@ -122,7 +122,7 @@ async def get_portfolio_summary():
 
 
 @app.get("/api/market/history")
-async def get_market_history(symbol: str = "BTCINR"):
+async def get_market_history(symbol: str = "BTCUSDT"):
     """Price chart — session only."""
     conn = _db()
     cur = conn.cursor()
@@ -180,7 +180,7 @@ async def get_logs(lines: int = 60):
 
 
 @app.get("/api/signals/history")
-async def get_signals_history(symbol: str = "BTCINR", limit: int = 200):
+async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
     """Signal events — session only."""
     conn = _db()
     cur = conn.cursor()
@@ -214,7 +214,7 @@ async def get_regime():
         conn = sqlite3.connect(database.DB_PATH)
         cur = conn.cursor()
         cur.execute(
-            "SELECT price FROM prices WHERE symbol='BTCINR' "
+            "SELECT price FROM prices WHERE symbol='BTCUSDT' "
             "ORDER BY timestamp DESC LIMIT 200"
         )
         rows = cur.fetchall()

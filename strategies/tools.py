@@ -5,7 +5,7 @@ These tools run locally (free, instant) and feed structured outputs to Claude.
 v2: Added RSIAnalyzer, MACDSignal, BollingerBands, SupportResistance, CandlePatterns
 """
 import statistics
-from logger import logger
+
 
 
 # ─── EXISTING TOOLS ───────────────────────────────────────────────────────────

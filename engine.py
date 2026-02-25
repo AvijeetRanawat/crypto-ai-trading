@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from logger import logger, log_trade
 from config import config
-from database import save_trade, update_trade_exit, save_portfolio_snapshot, save_lesson, update_intent, save_signal_event
+from database import save_trade, update_trade_exit, save_portfolio_snapshot, update_intent, save_signal_event
 
 from strategies.momentum import MomentumAgent
 from strategies.swing import SwingAgent
@@ -24,16 +24,16 @@ import sys
 # ─────────────────────────────────────────
 class PaperTradingSimulator:
     def __init__(self):
-        self.balance_inr = 100_000.0
+        self.balance_usdt = 1_250.0
         self.positions = {}
 
-    def enter_position(self, symbol, price, amount_inr, reason, side="LONG"):
-        if self.balance_inr < amount_inr:
+    def enter_position(self, symbol, price, amount_usdt, reason, side="LONG"):
+        if self.balance_usdt < amount_usdt:
             logger.warning(f"Insufficient balance for {symbol}")
             return False
 
-        quantity = amount_inr / price
-        self.balance_inr -= amount_inr
+        quantity = amount_usdt / price
+        self.balance_usdt -= amount_usdt
         entry_time = datetime.now()
         
         db_id = save_trade(symbol, side, price, quantity, entry_time, reason)
@@ -49,10 +49,10 @@ class PaperTradingSimulator:
             "trailing_active": False,   # Trailing stop activated?
         }
         log_trade(side, symbol, price, quantity, reason, trade_id=db_id)
-        save_portfolio_snapshot(self.balance_inr, len(self.positions))
+        save_portfolio_snapshot(self.balance_usdt, len(self.positions))
         
         emoji = "📈" if side == "LONG" else "📉"
-        logger.info(f"{emoji} {side}: {symbol} at ₹{price:,.2f} | Size: ₹{amount_inr:,.0f} | Bal: ₹{self.balance_inr:,.0f}")
+        logger.info(f"{emoji} {side}: {symbol} at ${price:,.2f} | Size: ${amount_usdt:,.0f} | Bal: ${self.balance_usdt:,.0f}")
         return True
 
     def exit_position(self, symbol, current_price, reason):
@@ -69,20 +69,20 @@ class PaperTradingSimulator:
             profit = (pos["entry_price"] - current_price) * pos["quantity"]
             revenue = (pos["quantity"] * pos["entry_price"]) + profit
             
-        self.balance_inr += revenue
+        self.balance_usdt += revenue
         exit_time = datetime.now()
         hold_secs = (exit_time - pos["entry_time"]).seconds
 
         update_trade_exit(pos["db_id"], exit_time, profit)
-        pnl_str = f"+₹{profit:.2f}" if profit >= 0 else f"-₹{abs(profit):.2f}"
+        pnl_str = f"+${profit:.2f}" if profit >= 0 else f"-${abs(profit):.2f}"
         
         log_trade("CLOSE", symbol, current_price, pos["quantity"],
                   f"{reason} | PnL: {pnl_str} | Held: {hold_secs}s", trade_id=pos["db_id"])
 
-        save_portfolio_snapshot(self.balance_inr, len(self.positions))
+        save_portfolio_snapshot(self.balance_usdt, len(self.positions))
         
         emoji = "✅" if profit >= 0 else "❌"
-        logger.info(f"{emoji} CLOSED {side} {symbol} at ₹{current_price:,.2f} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}")
+        logger.info(f"{emoji} CLOSED {side} {symbol} at ${current_price:,.2f} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}")
         
         return {
             "symbol": symbol, "side": side,
@@ -137,7 +137,7 @@ class TradingEngine:
         
         logger.info(f"Engine v5 ready. Watching: {config.BLUE_CHIP_WHITELIST}")
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
-        logger.info(f"  Position: ₹{config.MAX_POSITION_SIZE_INR:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
+        logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
 
     def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result) -> tuple:
         """Count how many pro tools are giving a BUY or SELL signal."""
@@ -348,7 +348,7 @@ class TradingEngine:
                     # At 50% of TP reached and signals still strong → add to position
                     pyramid_count = pos.get("pyramid_count", 0)
                     if (pnl_pct >= tp_pct * 0.5 and pyramid_count < 2
-                            and self.simulator.balance_inr > 10_000):
+                            and self.simulator.balance_usdt > 125):
                         # Quick signal check (no LLM needed here)
                         hist = list(self.price_history.get(symbol, []))
                         if len(hist) >= 30:
@@ -361,13 +361,13 @@ class TradingEngine:
                             signal_agrees = (pos["side"] == "LONG" and b_cnt >= 3) or \
                                             (pos["side"] == "SHORT" and s_cnt >= 3)
                             if signal_agrees:
-                                add_inr = int(pos.get("original_pos_inr", 10_000) * 0.5)
-                                add_inr = min(add_inr, int(self.simulator.balance_inr * 0.15))
-                                if add_inr >= 5_000:
-                                    self.simulator.enter_position(symbol, current_price, add_inr,
+                                add_usdt = int(pos.get("original_pos_usdt", 125) * 0.5)
+                                add_usdt = min(add_usdt, int(self.simulator.balance_usdt * 0.15))
+                                if add_usdt >= 60:
+                                    self.simulator.enter_position(symbol, current_price, add_usdt,
                                                                    f"🔺 Pyramid #{pyramid_count+1}", side=pos["side"])
                                     pos["pyramid_count"] = pyramid_count + 1
-                                    logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ₹{add_inr:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
+                                    logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ${add_usdt:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
 
                     # ── Fix 3: MINIMUM HOLD TIME (45s) ────────────────────
                     # Trades held <30s had 13% WR — pure noise. Force 45s minimum.
@@ -519,7 +519,7 @@ class TradingEngine:
                             continue
 
                         # ── Fix 1: HARD DUPLICATE BLOCKER ──────────────────
-                        # Old: ₹500 threshold (0.008% of BTC = useless). 140 dupes lost ₹1,428.
+                        # Old: $500 threshold (0.008% of BTC = useless). 140 dupes lost $1,428.
                         # New: 120s lockout + 0.15% relative price threshold
                         last_entry = self.last_entry_prices.get(symbol)
                         if last_entry:
@@ -576,7 +576,7 @@ class TradingEngine:
                         tool_outputs.append({"name": "Trend Filter",
                                              "data": f"{trend_sig.action} — {trend_sig.reason}"})
                         tool_outputs.append({"name": "Session Performance",
-                                             "data": f"WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | PnL: ₹{session_stats['cumulative_pnl']} — {session_stats['recommendation']}"})
+                                             "data": f"WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | PnL: ${session_stats['cumulative_pnl']} — {session_stats['recommendation']}"})
 
                         # ── CLAUDE MAKES THE FINAL CALL ──────────────────
                         self.last_llm_call = now
@@ -598,7 +598,7 @@ class TradingEngine:
                         effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
 
                         # ── Fix 2: CONFIDENCE FLOOR = 0.70 ────────────────
-                        # Below 0.70: 202 trades at 28-36% WR, lost ₹3,583 total
+                        # Below 0.70: 202 trades at 28-36% WR, lost $3,583 total
                         CONFIDENCE_FLOOR = 0.70
 
                         if not llm_signal or llm_signal.action == "NEUTRAL" or llm_signal.confidence < CONFIDENCE_FLOOR or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE:
@@ -627,21 +627,21 @@ class TradingEngine:
                         # Base sizing: 10k-28k based on confidence; Kelly fraction reduces after losses
                         base_conf = llm_signal.confidence
                         if base_conf >= 0.80:
-                            pos_inr = 28_000
+                            pos_usdt = 350
                         elif base_conf >= 0.65:
-                            pos_inr = 20_000
+                            pos_usdt = 250
                         elif base_conf >= 0.50:
-                            pos_inr = 15_000
+                            pos_usdt = 160
                         else:
-                            pos_inr = 10_000
+                            pos_usdt = 125
 
                         # Kelly adjustment: shrink after losing streaks
                         streak_info = session_stats.get('streak', '')
                         if 'LOSS' in str(streak_info) and any(str(n) in str(streak_info) for n in ['2','3','4','5']):
-                            pos_inr = int(pos_inr * 0.7)   # 30% reduction on losing streak
-                            logger.info(f"📉 Kelly: position shrunk to ₹{pos_inr:,} (loss streak)")
+                            pos_usdt = int(pos_usdt * 0.7)   # 30% reduction on losing streak
+                            logger.info(f"📉 Kelly: position shrunk to ${pos_usdt:,} (loss streak)")
 
-                        pos_inr = max(10_000, min(pos_inr, int(self.simulator.balance_inr * 0.30)))  # never > 30% balance
+                        pos_usdt = max(125, min(pos_usdt, int(self.simulator.balance_usdt * 0.30)))  # never > 30% balance
 
                         # ── EXECUTE ─────────────────────────────────────────
                         side = "LONG" if llm_signal.action == "BUY" else "SHORT"
@@ -651,15 +651,15 @@ class TradingEngine:
 
                         self.trades_executed += 1
                         self.skipped_cycles = 0
-                        update_intent(f"🎯 Trade #{self.trades_executed}: {side} ₹{pos_inr:,} | conf:{llm_signal.confidence:.2f} | {reason}", [symbol])
-                        self.simulator.enter_position(symbol, current_price, pos_inr, reason, side=side)
+                        update_intent(f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{llm_signal.confidence:.2f} | {reason}", [symbol])
+                        self.simulator.enter_position(symbol, current_price, pos_usdt, reason, side=side)
 
                         # Store dynamic stops in position for use in management
                         if symbol in self.simulator.positions:
                             self.simulator.positions[symbol]["dynamic_sl"] = dynamic_sl
                             self.simulator.positions[symbol]["dynamic_tp"] = dynamic_tp
                             self.simulator.positions[symbol]["pyramid_count"] = 0
-                            self.simulator.positions[symbol]["original_pos_inr"] = pos_inr
+                            self.simulator.positions[symbol]["original_pos_usdt"] = pos_usdt
 
                         save_signal_event(symbol, current_price, buy_count, sell_count,
                                           rsi_result['rsi'], macd_result['crossover'],
@@ -674,8 +674,8 @@ class TradingEngine:
 
         # ── Session Complete ─────────────────────────────────────────────────────
         logger.info(f"🏁 Session Complete! {self.trades_closed} trades.")
-        logger.info(f"💰 Net PnL: ₹{self.total_session_pnl:,.2f}")
-        logger.info(f"💼 Final Balance: ₹{self.simulator.balance_inr:,.2f}")
+        logger.info(f"💰 Net PnL: ${self.total_session_pnl:,.2f}")
+        logger.info(f"💼 Final Balance: ${self.simulator.balance_usdt:,.2f}")
         
         # ── 1. Meta-Optimizer (synthesises golden rules from lessons) ──
         if self.meta_optimizer:
@@ -693,5 +693,5 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Session post-mortem error: {e}")
         
-        update_intent(f"Done. {self.trades_closed} trades. PnL: ₹{self.total_session_pnl:,.2f}. Run 'python3 reset_session.py' to start fresh.", [])
+        update_intent(f"Done. {self.trades_closed} trades. PnL: ${self.total_session_pnl:,.2f}. Run 'python3 reset_session.py' to start fresh.", [])
         sys.exit(0)

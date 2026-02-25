@@ -36,8 +36,8 @@ class Config:
     PERIODIC_REVIEW_SECONDS = 600  # Also review every 10 min if any new trades
 
     # ── Position Sizing ──
-    MAX_POSITION_SIZE_INR = 20000
-    MIN_POSITION_SIZE_INR = 20000
+    MAX_POSITION_SIZE_USDT = 250
+    MIN_POSITION_SIZE_USDT = 250
     STOP_LOSS_PCT = 1.0
     MAX_POSITIONS = 1
 
@@ -54,6 +54,6 @@ class Config:
     REST_BASE_URL = "https://api.coindcx.com"
 
     # ── Asset Focus ──
-    BLUE_CHIP_WHITELIST = ["BTCINR"]
+    BLUE_CHIP_WHITELIST = ["BTCUSDT"]
 
 config = Config()

@@ -1,6 +1,6 @@
 import logging
 import sys
-from datetime import datetime
+
 
 logger = logging.getLogger("CoinDCXAgent")
 logger.setLevel(logging.DEBUG)

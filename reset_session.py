@@ -18,7 +18,7 @@ Usage:
   python3 reset_session.py
 """
 import sqlite3
-from database import DB_PATH, init_db
+from database import DB_PATH
 from logger import logger
 
 

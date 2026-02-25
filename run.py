@@ -42,6 +42,10 @@ if __name__ == "__main__":
         f.write(f"=== Session started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
     print(f"🗑  Log cleared. PID {os.getpid()} locked. Fresh session starting...")
 
+    # ── Reset Session Data ──
+    from reset_session import reset_session
+    reset_session()
+
     p1 = multiprocessing.Process(target=run_dashboard)
     p2 = multiprocessing.Process(target=start_agent_loop)
     

@@ -1,5 +1,5 @@
 import json
-import boto3
+
 from config import config
 from logger import logger
 from database import get_recent_lessons, save_lesson

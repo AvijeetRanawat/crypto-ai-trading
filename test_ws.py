@@ -4,8 +4,8 @@ from logger import logger
 
 async def test_ws():
     logger.info("Testing WebSocket (Socket.io) connectivity...")
-    # Subscribe to BTCINR and ETHINR
-    channels = ["BTCINR", "ETHINR"]
+    # Subscribe to BTCUSDT and ETHUSDT
+    channels = ["BTCUSDT", "ETHUSDT"]
     
     # Run the listener in the background
     listener = asyncio.create_task(client.connect_ws(channels))
