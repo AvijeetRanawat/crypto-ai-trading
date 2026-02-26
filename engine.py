@@ -295,8 +295,13 @@ class TradingEngine:
                         label=f"PERIODIC-{review_count}",
                     )
                     last_reviewed_trade_id = new_id
+                    
+                    # ── v7: Re-distill lessons into master rules after review ──
+                    from distill_lessons import distill_all
+                    distill_all()
+                    
                 except Exception as e:
-                    logger.error(f"run_mini_review failed: {e}", exc_info=True)
+                    logger.error(f"Post-review improvement failed: {e}", exc_info=True)
 
                 last_review_time     = now
                 last_closed_snapshot = self.trades_closed
@@ -323,6 +328,13 @@ class TradingEngine:
     async def run_loop(self):
         logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max)...")
         
+        # ── v7 Warmup: Fetch 1m historical klines to skip 35min wait ──
+        for symbol in config.BLUE_CHIP_WHITELIST:
+            klines = self.client.get_historical_klines(symbol, interval='1m', limit=60)
+            if klines:
+                self.price_history[symbol].extend(klines)
+                logger.info(f"📈 Pre-loaded {len(klines)} historical 1m ticks for {symbol}.")
+
         while self.trades_closed < config.MAX_TRADES_RUN:
             try:
                 for symbol, price in self.client.latest_prices.items():
@@ -388,9 +400,9 @@ class TradingEngine:
                                     pos["pyramid_count"] = pyramid_count + 1
                                     logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ${add_usdt:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
 
-                    # ── Fix 3: MINIMUM HOLD TIME (45s) ────────────────────
-                    # Trades held <30s had 13% WR — pure noise. Force 45s minimum.
-                    min_hold_met = hold_secs >= 45
+                    # ── Fix 3: MINIMUM HOLD TIME (300s) ────────────────────
+                    # Allow 1m candles enough time to breathe. Force 5m minimum.
+                    min_hold_met = hold_secs >= 300
 
                     # ── TAKE PROFIT ──
                     if min_hold_met and pnl_pct >= tp_pct:
@@ -535,27 +547,26 @@ class TradingEngine:
                             update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
                             continue
 
-                        # ── Fix 5: POST-CLOSE COOLDOWN (60s) ───────────────
-                        if self.last_close_time and (now - self.last_close_time).total_seconds() < 60:
-                            remaining_cd = 60 - int((now - self.last_close_time).total_seconds())
+                        # ── Fix 5: POST-CLOSE COOLDOWN (300s) ───────────────
+                        if self.last_close_time and (now - self.last_close_time).total_seconds() < 300:
+                            remaining_cd = 300 - int((now - self.last_close_time).total_seconds())
                             if self.skipped_cycles % 3 == 0:
                                 update_intent(f"⏸ Post-close cooldown: {remaining_cd}s remaining", [symbol])
                             continue
 
                         # ── Fix 1: HARD DUPLICATE BLOCKER ──────────────────
-                        # Old: $500 threshold (0.008% of BTC = useless). 140 dupes lost $1,428.
-                        # New: 120s lockout + 0.15% relative price threshold
+                        # New: 600s (10m) lockout + 0.15% relative price threshold
                         last_entry = self.last_entry_prices.get(symbol)
                         if last_entry:
                             last_price, last_side, last_time = last_entry
                             time_since = (now - last_time).total_seconds()
                             price_diff_pct = abs(current_price - last_price) / last_price
-                            # Hard time lock: no entry within 120s of last entry (any direction)
-                            if time_since < 120:
-                                update_intent(f"⏸ Entry blocked: {int(120 - time_since)}s lockout remaining", [symbol])
+                            # Hard time lock: no entry within 600s of last entry (any direction)
+                            if time_since < 600:
+                                update_intent(f"⏸ Entry blocked: {int(600 - time_since)}s lockout remaining", [symbol])
                                 continue
                             # Same-direction price proximity: block if within 0.15%
-                            if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 600:
+                            if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 1200:
                                 update_intent(f"⏸ Duplicate blocked: {proposed_dir} only {price_diff_pct*100:.3f}% from last entry", [symbol])
                                 continue
 

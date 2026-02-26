@@ -5,7 +5,8 @@
 
 const API = "/api";
 let priceChart = null, priceSeries = null;
-let perfChart = null, signalChart = null;
+let signalChart = null, buySeries = null, sellSeries = null;
+let perfChart = null;
 let chartsReady = false;
 let startTime = Date.now();
 let knownSessionStart = null;
@@ -36,12 +37,42 @@ function initCharts() {
         lastValueVisible: true, priceLineColor: '#3b82f6',
     });
 
+    // 2. LightweightCharts — Signal Intelligence (linked to priceChart)
+    const signalContainer = document.getElementById('signalChart');
+    signalChart = LightweightCharts.createChart(signalContainer, {
+        width: signalContainer.clientWidth,
+        height: 120,
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#71717a' },
+        grid: { vertLines: { display: false }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)', scaleMargins: { top: 0.1, bottom: 0.1 } },
+        timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true, secondsVisible: false, visible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    });
+
+    buySeries = signalChart.addHistogramSeries({ color: 'rgba(34,197,94,0.6)', priceFormat: { type: 'volume' } });
+    sellSeries = signalChart.addHistogramSeries({ color: 'rgba(239,68,68,0.6)', priceFormat: { type: 'volume' } });
+
+    // ── SYNC LOGIC ──
+    let isSyncing = false;
+    const sync = (src, dest) => {
+        src.timeScale().subscribeVisibleLogicalRangeChange(range => {
+            if (isSyncing) return;
+            isSyncing = true;
+            dest.timeScale().setVisibleLogicalRange(range);
+            isSyncing = false;
+        });
+    };
+    sync(priceChart, signalChart);
+    sync(signalChart, priceChart);
+
     new ResizeObserver(() => {
         const w = container.clientWidth, hh = +container.style.height.replace('px', '');
+        const sw = signalContainer.clientWidth;
         if (w > 0 && hh > 0) priceChart.applyOptions({ width: w, height: hh });
+        if (sw > 0) signalChart.applyOptions({ width: sw });
     }).observe(container);
 
-    // 2. Chart.js — Trade Performance (Cumulative PnL bar per trade)
+    // 3. Chart.js — Trade Performance
     perfChart = new Chart(document.getElementById('perfChart').getContext('2d'), {
         type: 'bar',
         data: {
@@ -76,26 +107,7 @@ function initCharts() {
         }
     });
 
-    // 3. Chart.js — Signal Intelligence (buy/sell vote bars)
-    signalChart = new Chart(document.getElementById('signalChart').getContext('2d'), {
-        type: 'bar',
-        data: {
-            labels: [],
-            datasets: [
-                { label: 'BUY votes', data: [], backgroundColor: 'rgba(34,197,94,0.75)', borderRadius: 3, barPercentage: 0.7 },
-                { label: 'SELL votes', data: [], backgroundColor: 'rgba(239,68,68,0.75)', borderRadius: 3, barPercentage: 0.7 },
-            ]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false, animation: false,
-            plugins: { legend: { display: false } },
-            scales: {
-                x: { display: false },
-                y: { min: 0, max: 5, ticks: { color: '#4b5563', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.04)' } }
-            }
-        }
-    });
-
+    // ChartsReady is now set after all init
     chartsReady = true;
 }
 
@@ -151,21 +163,22 @@ async function checkFreshStart() {
         const stored = localStorage.getItem('tradingSessionStart');
 
         if (!stored) {
-            // First ever page load — just record the session, don't wipe anything
             localStorage.setItem('tradingSessionStart', data.session_start);
+            localStorage.setItem('tradingSessionStartMs', data.session_start_ms);
             knownSessionStart = data.session_start;
-            startTime = Date.now();
+            startTime = data.session_start_ms;
             return;
         }
 
         knownSessionStart = stored;
+        startTime = parseInt(localStorage.getItem('tradingSessionStartMs') || data.session_start_ms);
 
         if (data.session_start !== stored) {
-            // True system restart detected — reset everything
             console.log('[Dashboard] System restarted — resetting UI...');
             localStorage.setItem('tradingSessionStart', data.session_start);
+            localStorage.setItem('tradingSessionStartMs', data.session_start_ms);
             knownSessionStart = data.session_start;
-            startTime = Date.now();
+            startTime = data.session_start_ms;
             lastTradeCount = 0;
             lastLogLength = 0;
             warmupDone = false;
@@ -322,13 +335,16 @@ async function updateSignals() {
         const data = await res.json();
         if (!data.length || !chartsReady) return;
 
-        const labels = data.map(d => d.timestamp.slice(11, 16));
-        const buy = data.map(d => d.buy_votes);
-        const sell = data.map(d => d.sell_votes);
-        signalChart.data.labels = labels;
-        signalChart.data.datasets[0].data = buy;
-        signalChart.data.datasets[1].data = sell;
-        signalChart.update('none');
+        const history = data.map(d => ({
+            time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+            buy: d.buy_votes,
+            sell: d.sell_votes,
+        })).sort((a, b) => a.time - b.time);
+
+        if (history.length) {
+            buySeries.setData(history.map(h => ({ time: h.time, value: h.buy })));
+            sellSeries.setData(history.map(h => ({ time: h.time, value: -h.sell }))); // Negative for bottom projection
+        }
 
         const latest = data[data.length - 1];
         if (latest) {
@@ -509,9 +525,43 @@ async function pollSlow() {
     ]);
 }
 
+// ── RESIZER LOGIC ─────────────────────────────────────────────────────────────
+function initResizer() {
+    const resizer = el('v-resizer');
+    const aside = document.querySelector('.ai-panel');
+    let isResizing = false;
+
+    // Load saved width
+    const savedWidth = localStorage.getItem('ai-panel-width');
+    if (savedWidth) aside.style.width = savedWidth + 'px';
+
+    resizer.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        document.body.style.cursor = 'col-resize';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+        const width = window.innerWidth - e.clientX - 12; // 12px padding offset
+        if (width > 150 && width < 600) {
+            aside.style.width = width + 'px';
+            localStorage.setItem('ai-panel-width', width);
+        }
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (isResizing) {
+            isResizing = false;
+            document.body.style.cursor = 'default';
+        }
+    });
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
     initCharts();
+    initResizer();
     setInterval(updateUptime, 1000);
 
     await pollAll();

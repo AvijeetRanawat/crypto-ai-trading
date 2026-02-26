@@ -16,20 +16,20 @@ class Config:
     # ── Confidence & Risk Gates ──
     MIN_ENSEMBLE_CONFIDENCE = 0.58   # Auto-tuned 16:28   # Auto-tuned 16:27   # Auto-tuned 09:01   # Auto-tuned 08:41   # Auto-tuned 08:23   # Auto-tuned 08:23   # Auto-tuned 07:38   # Auto-tuned 04:34   # Auto-tuned 04:18   # Auto-tuned 04:18   # Auto-tuned 04:01   # Auto-tuned 03:51   # Auto-tuned 03:34   # Auto-tuned 03:00   # Auto-tuned 01:48   # Auto-tuned 01:48   # Auto-tuned 00:58   # Auto-tuned 23:39   # Auto-tuned 23:03   # Auto-tuned 14:53
     ALGO_SIGNAL_THRESHOLD = 0.10
-    EARLY_STOP_LOSS_PCT = 0.008   # Auto-tuned 17:10   # Auto-tuned 17:09   # Auto-tuned 17:05   # Auto-tuned 16:51   # Auto-tuned 16:48   # Auto-tuned 16:47   # Auto-tuned 16:40   # Auto-tuned 16:37   # Auto-tuned 16:29   # Auto-tuned 16:28   # Auto-tuned 15:57   # Auto-tuned 15:35   # Auto-tuned 15:34   # Auto-tuned 14:10   # Auto-tuned 13:50   # Auto-tuned 13:26   # Auto-tuned 11:13   # Auto-tuned 08:53   # Auto-tuned 08:52   # Auto-tuned 08:41   # Auto-tuned 08:23   # Auto-tuned 08:23   # Auto-tuned 07:38   # Auto-tuned 07:22   # Auto-tuned 07:04   # Auto-tuned 05:53   # Auto-tuned 04:35   # Auto-tuned 04:34   # Auto-tuned 04:18   # Auto-tuned 04:18   # Auto-tuned 04:01   # Auto-tuned 03:51   # Auto-tuned 03:34   # Auto-tuned 03:00   # Auto-tuned 02:17   # Auto-tuned 02:16   # Auto-tuned 01:48   # Auto-tuned 01:48   # Auto-tuned 01:15   # Auto-tuned 00:58   # Auto-tuned 00:49   # Auto-tuned 23:39   # Auto-tuned 23:21   # Auto-tuned 23:03   # Auto-tuned 22:46   # Auto-tuned 22:12   # Auto-tuned 21:55   # Auto-tuned 21:53   # Auto-tuned 21:12   # Auto-tuned 21:12   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20      # Auto-tuned 14:53
-    LLM_POLL_INTERVAL_SECONDS = 10   # Call Claude every 10s
+    EARLY_STOP_LOSS_PCT = 0.015   # Auto-tuned 19:50   # Auto-tuned 17:10   # Auto-tuned 17:09   # Auto-tuned 17:05   # Auto-tuned 16:51   # Auto-tuned 16:48   # Auto-tuned 16:47   # Auto-tuned 16:40   # Auto-tuned 16:37   # Auto-tuned 16:29   # Auto-tuned 16:28   # Auto-tuned 15:57   # Auto-tuned 15:35   # Auto-tuned 15:34   # Auto-tuned 14:10   # Auto-tuned 13:50   # Auto-tuned 13:26   # Auto-tuned 11:13   # Auto-tuned 08:53   # Auto-tuned 08:52   # Auto-tuned 08:41   # Auto-tuned 08:23   # Auto-tuned 08:23   # Auto-tuned 07:38   # Auto-tuned 07:22   # Auto-tuned 07:04   # Auto-tuned 05:53   # Auto-tuned 04:35   # Auto-tuned 04:34   # Auto-tuned 04:18   # Auto-tuned 04:18   # Auto-tuned 04:01   # Auto-tuned 03:51   # Auto-tuned 03:34   # Auto-tuned 03:00   # Auto-tuned 02:17   # Auto-tuned 02:16   # Auto-tuned 01:48   # Auto-tuned 01:48   # Auto-tuned 01:15   # Auto-tuned 00:58   # Auto-tuned 00:49   # Auto-tuned 23:39   # Auto-tuned 23:21   # Auto-tuned 23:03   # Auto-tuned 22:46   # Auto-tuned 22:12   # Auto-tuned 21:55   # Auto-tuned 21:53   # Auto-tuned 21:12   # Auto-tuned 21:12   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20      # Auto-tuned 14:53
+    LLM_POLL_INTERVAL_SECONDS = 300  # Ask Claude every 5 mins maximum
 
     # ── Dynamic Exit Strategy ──
-    TAKE_PROFIT_PCT = 0.012   # Auto-tuned 17:10   # Auto-tuned 17:09   # Auto-tuned 17:05   # Auto-tuned 16:51   # Auto-tuned 16:48   # Auto-tuned 16:47   # Auto-tuned 16:40   # Auto-tuned 16:37   # Auto-tuned 16:29   # Auto-tuned 16:28   # Auto-tuned 15:57   # Auto-tuned 15:35   # Auto-tuned 15:34   # Auto-tuned 14:10   # Auto-tuned 13:50   # Auto-tuned 13:26   # Auto-tuned 11:13   # Auto-tuned 08:53   # Auto-tuned 08:52   # Auto-tuned 08:41   # Auto-tuned 08:23   # Auto-tuned 08:23   # Auto-tuned 07:38   # Auto-tuned 07:22   # Auto-tuned 07:04   # Auto-tuned 05:53   # Auto-tuned 04:35   # Auto-tuned 04:34   # Auto-tuned 04:18   # Auto-tuned 04:18   # Auto-tuned 04:01   # Auto-tuned 03:51   # Auto-tuned 03:34   # Auto-tuned 03:00   # Auto-tuned 02:17   # Auto-tuned 02:16   # Auto-tuned 01:48   # Auto-tuned 01:48   # Auto-tuned 01:15   # Auto-tuned 00:58   # Auto-tuned 00:49   # Auto-tuned 23:39   # Auto-tuned 23:21   # Auto-tuned 23:03   # Auto-tuned 22:46   # Auto-tuned 22:12   # Auto-tuned 21:55   # Auto-tuned 21:53   # Auto-tuned 21:12   # Auto-tuned 21:12   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20          # Auto-tuned 14:53
+    TAKE_PROFIT_PCT = 0.025   # Auto-tuned 19:50   # Auto-tuned 17:10   # Auto-tuned 17:09   # Auto-tuned 17:05   # Auto-tuned 16:51   # Auto-tuned 16:48   # Auto-tuned 16:47   # Auto-tuned 16:40   # Auto-tuned 16:37   # Auto-tuned 16:29   # Auto-tuned 16:28   # Auto-tuned 15:57   # Auto-tuned 15:35   # Auto-tuned 15:34   # Auto-tuned 14:10   # Auto-tuned 13:50   # Auto-tuned 13:26   # Auto-tuned 11:13   # Auto-tuned 08:53   # Auto-tuned 08:52   # Auto-tuned 08:41   # Auto-tuned 08:23   # Auto-tuned 08:23   # Auto-tuned 07:38   # Auto-tuned 07:22   # Auto-tuned 07:04   # Auto-tuned 05:53   # Auto-tuned 04:35   # Auto-tuned 04:34   # Auto-tuned 04:18   # Auto-tuned 04:18   # Auto-tuned 04:01   # Auto-tuned 03:51   # Auto-tuned 03:34   # Auto-tuned 03:00   # Auto-tuned 02:17   # Auto-tuned 02:16   # Auto-tuned 01:48   # Auto-tuned 01:48   # Auto-tuned 01:15   # Auto-tuned 00:58   # Auto-tuned 00:49   # Auto-tuned 23:39   # Auto-tuned 23:21   # Auto-tuned 23:03   # Auto-tuned 22:46   # Auto-tuned 22:12   # Auto-tuned 21:55   # Auto-tuned 21:53   # Auto-tuned 21:12   # Auto-tuned 21:12   # Auto-tuned 20:54   # Auto-tuned 20:30   # Auto-tuned 18:21   # Auto-tuned 17:20          # Auto-tuned 14:53
     TRAILING_STOP_TRIGGER_PCT = 0.003  # At +0.3% profit, activate trailing stop
     TRAILING_STOP_OFFSET_PCT = 0.002   # Trail by 0.2% from peak
 
     # ── Timeframes ──
     MAX_TRADES_RUN = 1000          # Run indefinitely
-    MANDATORY_EXIT_SECONDS = 300   # 5-min max hold
-    CHECK_INTERVAL_SECONDS = 5
-    POLL_INTERVAL_SECONDS = 5
-    COOLDOWN_MINUTES = 0           # Immediate re-entry
+    MANDATORY_EXIT_SECONDS = 21600 # 6 hours max hold
+    CHECK_INTERVAL_SECONDS = 60
+    POLL_INTERVAL_SECONDS = 60
+    COOLDOWN_MINUTES = 5           # Wait 5 mins after a trade
 
     # ── Periodic Self-Improvement ──
     PERIODIC_REVIEW_TRADES = 5     # Trigger a mini-review every 5 closed trades
@@ -44,11 +44,11 @@ class Config:
     # ── Entry Filters ──
     MIN_24H_DIP_PCT = -1.0
     ENTRY_NEAR_LOW_PCT = 0.02
-    MOMENTUM_WINDOW_MINS = 5
+    MOMENTUM_WINDOW_MINS = 60
     MIN_MOMENTUM_PCT = 0.0005
 
     # ── AWS Bedrock LLM ──
-    BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
+    BEDROCK_MODEL_ID = "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
 
     # ── API ──
     REST_BASE_URL = "https://api.coindcx.com"

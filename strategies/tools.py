@@ -22,7 +22,7 @@ class VolatilityScanner:
         if len(history) < 10:
             return {"volatility_pct": 0.0, "verdict": "Insufficient data", "tradeable": False}
         
-        recent = history[-60:]  # Last 5 min of 5s ticks
+        recent = history[-60:]  # Last 60 min of 1m ticks
         mean = statistics.mean(recent)
         if mean == 0:
             return {"volatility_pct": 0.0, "verdict": "Dead market", "tradeable": False}
@@ -55,28 +55,28 @@ class PriceVelocity:
 
     @staticmethod
     def analyze(history: list, current_price: float) -> dict:
-        result = {"velocity_30s": 0.0, "velocity_1m": 0.0, "velocity_5m": 0.0, "acceleration": "flat"}
-        if len(history) < 12:
+        result = {"velocity_2m": 0.0, "velocity_5m": 0.0, "velocity_15m": 0.0, "acceleration": "flat"}
+        if len(history) < 60:
             return result
         
-        if len(history) >= 6:
-            p30 = history[-6]
-            result["velocity_30s"] = round(((current_price - p30) / p30) * 100, 4) if p30 else 0
+        if len(history) >= 2:
+            p2 = history[-2]
+            result["velocity_2m"] = round(((current_price - p2) / p2) * 100, 4) if p2 else 0
         
-        if len(history) >= 12:
-            p1m = history[-12]
-            result["velocity_1m"] = round(((current_price - p1m) / p1m) * 100, 4) if p1m else 0
+        if len(history) >= 5:
+            p5 = history[-5]
+            result["velocity_5m"] = round(((current_price - p5) / p5) * 100, 4) if p5 else 0
         
-        if len(history) >= 60:
-            p5m = history[-60]
-            result["velocity_5m"] = round(((current_price - p5m) / p5m) * 100, 4) if p5m else 0
+        if len(history) >= 15:
+            p15 = history[-15]
+            result["velocity_15m"] = round(((current_price - p15) / p15) * 100, 4) if p15 else 0
         
-        v30 = abs(result["velocity_30s"])
-        v1m = abs(result["velocity_1m"])
+        v2 = abs(result["velocity_2m"])
+        v5 = abs(result["velocity_5m"])
         
-        if v30 > v1m * 1.5:
+        if v2 > v5 * 1.5:
             result["acceleration"] = "ACCELERATING — momentum building"
-        elif v30 < v1m * 0.5:
+        elif v2 < v5 * 0.5:
             result["acceleration"] = "DECELERATING — momentum fading"
         else:
             result["acceleration"] = "STEADY — stable speed"
@@ -269,7 +269,7 @@ class RSIAnalyzer:
         rsi = round(rsi, 2)
 
         # ── Treat RSI extremes as strong signals, not artifacts ──
-        # On 5s ticks BTC can legitimately hit RSI extremes during sharp moves
+        # On 1m ticks BTC can legitimately hit RSI extremes during sharp moves
         if rsi < 5:
             return {"rsi": rsi, "signal": "STRONG_BUY",
                     "verdict": f"RSI {rsi} — DEEPLY OVERSOLD, extreme buying opportunity",
@@ -516,7 +516,7 @@ class CandlePatterns:
     @staticmethod
     def analyze(history: list) -> dict:
         """
-        Uses groups of 5 ticks as synthetic candles (25s candles at 5s interval).
+        Uses groups of 5 ticks as synthetic candles (5m candles at 1m interval).
         Looks at last 3 synthetic candles for patterns.
         """
         if len(history) < 25:
@@ -529,7 +529,7 @@ class CandlePatterns:
             l = min(ticks)
             return {"open": o, "close": c, "high": h, "low": l}
 
-        # Build 3 recent synthetic candles (each = 5 ticks = 25s)
+        # Build 3 recent synthetic candles (each = 5 ticks = 5m)
         c1 = make_candle(list(history)[-25:-20])
         c2 = make_candle(list(history)[-20:-15])
         c3 = make_candle(list(history)[-15:-10])
@@ -865,9 +865,9 @@ class ATRTracker:
         sl_pct = round(atr_pct * ATRTracker.SL_MULT, 5)
         tp_pct = round(atr_pct * ATRTracker.TP_MULT, 5)
 
-        # Safety guards: never tighter than 0.1%, never wider than 1.5%
-        sl_pct = max(0.001, min(0.015, sl_pct))
-        tp_pct = max(0.002, min(0.030, tp_pct))
+        # Safety guards: never tighter than 0.1%, never wider than 3.0%
+        sl_pct = max(0.001, min(0.030, sl_pct))
+        tp_pct = max(0.002, min(0.060, tp_pct))
 
         return {
             "atr": round(atr, 2),
@@ -880,34 +880,34 @@ class ATRTracker:
 
 class MultiTimeframeConfirmer:
     """
-    Builds synthetic 5-minute candles from 1-minute tick data and checks
+    Builds synthetic 1-hour candles from 1-minute tick data and checks
     whether the higher timeframe trend agrees with the proposed trade direction.
 
-    Why: 1-minute signals are noisy and frequently contradict the 5-minute trend.
+    Why: 1-minute signals are noisy and frequently contradict the 1-hour trend.
     Requiring HTF agreement cuts false signals dramatically (~40% reduction).
     """
     name = "Multi-Timeframe"
-    TICKS_PER_5MIN = 60  # 5 min × 12 ticks/min (5s interval)
+    TICKS_PER_HTF = 60  # 60 min × 1 ticks/min (1m interval)
 
     @staticmethod
     def analyze(history: list, proposed_direction: str) -> dict:
         """
         proposed_direction: 'LONG' or 'SHORT'
-        Returns whether the 5-min structure CONFIRMS or REJECTS the signal.
+        Returns whether the HTF structure CONFIRMS or REJECTS the signal.
         """
         prices = list(history)
 
-        if len(prices) < MultiTimeframeConfirmer.TICKS_PER_5MIN * 2:
+        if len(prices) < MultiTimeframeConfirmer.TICKS_PER_HTF * 2:
             return {"confirms": True, "htf_trend": "UNKNOWN",
                     "verdict": "Insufficient history — defaulting to ALLOW"}
 
-        # Build 2 × 5-minute synthetic candles
+        # Build 2 × HTF synthetic candles
         def candle(seg):
             return {"open": seg[0], "high": max(seg), "low": min(seg), "close": seg[-1]}
 
-        c1 = candle(prices[-MultiTimeframeConfirmer.TICKS_PER_5MIN * 2:
-                          -MultiTimeframeConfirmer.TICKS_PER_5MIN])
-        c2 = candle(prices[-MultiTimeframeConfirmer.TICKS_PER_5MIN:])
+        c1 = candle(prices[-MultiTimeframeConfirmer.TICKS_PER_HTF * 2:
+                          -MultiTimeframeConfirmer.TICKS_PER_HTF])
+        c2 = candle(prices[-MultiTimeframeConfirmer.TICKS_PER_HTF:])
 
         # 5-min trend: is c2 bullish or bearish vs c1?
         if c2["close"] > c1["close"] * 1.0002:   # at least 0.02% higher

@@ -4,7 +4,7 @@ import boto3
 from strategies.base import BaseStrategy, Signal
 from config import config
 from logger import logger
-from database import get_recent_lessons
+from database import get_recent_lessons, get_distilled_rules
 
 # ── LLM Response Cache ─────────────────────────────────────────────────────────
 # Key: (rsi_tier, macd, bb_zone, buy_votes, sell_votes, regime)
@@ -60,35 +60,41 @@ class LLMAgent(BaseStrategy):
             self.bedrock = None
 
     def _build_lessons_context(self):
-        lessons = get_recent_lessons(limit=12)
-        if not lessons:
-            return ""
-
-        # Split into SELF_CRITIQUE (hard behavioural overrides) vs general lessons
-        critiques = [(c, l, s) for c, l, s in lessons if s == "SELF_CRITIQUE"]
-        others    = [(c, l, s) for c, l, s in lessons if s != "SELF_CRITIQUE"]
-
+        """Builds a compact context of past wisdom using distilled rules and recent critiques."""
+        # 1. Fetch Distilled Master Rules
+        distilled = get_distilled_rules()
+        
+        # 2. Fetch Recent Lessons (Fresh context)
+        lessons = get_recent_lessons(limit=10)
+        
         parts = []
 
-        # Inject top-3 self-critiques as hard rules Claude must follow
-        if critiques:
-            rules = []
-            for c, l, _ in critiques[:3]:
-                # Extract the Adj: clause which contains the concrete rule
-                adj_start = l.find("| Adj:")
-                rule = l[adj_start + 7:].strip() if adj_start >= 0 else l[:120]
-                rules.append(f"  - {rule}")
-            parts.append("\n<HARD_RULES — you MUST follow these, do NOT return NEUTRAL if conditions match>\n"
-                         + "\n".join(rules)
-                         + "\n</HARD_RULES>\n")
-
-        # General lessons
-        if others:
+        # A. Distilled Rules (Permanent Strategy)
+        if distilled:
             lines = []
-            for i, (condition, lesson, severity) in enumerate(others[:6], 1):
-                emoji = "🏆" if severity == "GOLDEN" else ("✅" if severity == "WIN" else "❌")
-                lines.append(f"  {i}. {emoji} [{severity}] {condition[:80]} → {lesson[:120]}")
-            parts.append("\n<PAST_LESSONS>\n" + "\n".join(lines) + "\n</PAST_LESSONS>\n")
+            for category, rule, count in distilled:
+                lines.append(f"  - [{category} Master Rule]: {rule}")
+            parts.append("\n<MASTER_STRATEGY_RULES - Distilled from {sum(d[2] for d in distilled)} past lessons>\n" 
+                         + "\n".join(lines) 
+                         + "\n</MASTER_STRATEGY_RULES>\n")
+
+        # B. Fresh Self-Critiques (Immediate behavioural overrides)
+        if lessons:
+            critiques = [(c, l, s) for c, l, s in lessons if s == "SELF_CRITIQUE"]
+            if critiques:
+                rules = []
+                for c, l, _ in critiques[:3]:
+                    adj_start = l.find("| Adj:")
+                    rule = l[adj_start + 7:].strip() if adj_start >= 0 else l[:120]
+                    rules.append(f"  - {rule}")
+                parts.append("\n<HARD_RULES — recent self-corrections you MUST follow>\n"
+                             + "\n".join(rules)
+                             + "\n</HARD_RULES>\n")
+        
+        # C. Very Recent Results
+        others = [f"  - {c[:60]} -> {l[:100]}" for c, l, s in lessons if s != "SELF_CRITIQUE"][:3]
+        if others:
+             parts.append("\n<RECENT_OUTCOMES>\n" + "\n".join(others) + "\n</RECENT_OUTCOMES>\n")
 
         return "".join(parts)
 

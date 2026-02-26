@@ -16,9 +16,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+import time
 
 # ── Session start time — set once when this process boots ────────────────────
 SESSION_START = datetime.now().isoformat()
+SESSION_START_MS = int(time.time() * 1000)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -36,7 +38,10 @@ def _db():
 @app.get("/api/session_start")
 async def session_start():
     """Frontend uses this to detect a new session and clear stale UI state."""
-    return {"session_start": SESSION_START}
+    return {
+        "session_start": SESSION_START,
+        "session_start_ms": SESSION_START_MS
+    }
 
 
 @app.get("/api/warmup")
@@ -57,7 +62,7 @@ async def get_warmup():
         "min_ticks": MIN_TICKS,
         "pct": min(100, round(ticks / MIN_TICKS * 100)),
         "done": done,
-        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 5),
+        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 60),
     }
 
 

@@ -40,11 +40,36 @@ class CoinDCXClient:
         result = self._get_with_retry(f"{self.base_url}/exchange/ticker")
         return result if result else []
 
+    def get_historical_klines(self, symbol, interval='1m', limit=60):
+        """Fetches historical k-lines (candles) for immediate warmup.
+        For CoinDCX, the pair format is B-BTC_USDT.
+        https://public.coindcx.com/market_data/candles?pair=B-BTC_USDT&interval=1m
+        """
+        public_url = "https://public.coindcx.com"
+        fmt_symbol = f"B-{symbol[:3]}_{symbol[3:]}" if symbol.endswith("USDT") else f"I-{symbol[:3]}_{symbol[3:]}"
+        url = f"{public_url}/market_data/candles?pair={fmt_symbol}&interval={interval}"
+        
+        # We need raw requests as it's a different base URL
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if data and isinstance(data, list):
+                # Data comes newest first usually, we want chronological order for warmup
+                data.sort(key=lambda x: x.get('time', 0))
+                # Take only the 'limit' most recent closes
+                closes = [float(k.get('close', 0)) for k in data[-limit:]]
+                return closes
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch historical klines for {symbol}: {e}")
+            return []
+
     async def connect_ws(self, channels=None):
         """Polls ticker frequently to capture micro-momentum + 24h metadata."""
         if channels:
             self.monitored_channels = channels
-        logger.info("Starting High-Frequency Price Feed (5s interval)...")
+        logger.info(f"Starting Price Feed ({config.POLL_INTERVAL_SECONDS}s interval)...")
         while True:
             try:
                 tickers = self.get_market_ticker()

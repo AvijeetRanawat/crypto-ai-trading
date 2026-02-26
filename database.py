@@ -83,6 +83,17 @@ def init_db():
         )
     ''')
 
+    # Strategy Rules Table (Distilled knowledge)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS strategy_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT UNIQUE,
+            rule TEXT,
+            source_count INTEGER,
+            last_updated TEXT
+        )
+    ''')
+
     # Seed single record
     cursor.execute('INSERT OR IGNORE INTO intent (id, message, targets) VALUES (1, "Scanning...", "[]")')
     
@@ -225,6 +236,30 @@ def get_missed_opportunities(symbol, min_votes=3, limit=20):
         AND (buy_votes >= ? OR sell_votes >= ?)
         ORDER BY id DESC LIMIT ?
     ''', (symbol, min_votes, min_votes, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def save_distilled_rule(category, rule, source_count):
+    """Saves or updates a master rule in the strategy_rules table."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO strategy_rules (category, rule, source_count, last_updated)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(category) DO UPDATE SET
+            rule=excluded.rule,
+            source_count=excluded.source_count,
+            last_updated=excluded.last_updated
+    ''', (category, rule, source_count, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_distilled_rules():
+    """Returns all summarized rules from the strategy_rules table."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT category, rule, source_count FROM strategy_rules')
     rows = cursor.fetchall()
     conn.close()
     return rows
