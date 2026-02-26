@@ -12,7 +12,7 @@ class CoinDCXClient:
         self.ticker_meta = {}     # {symbol: {change_24h, volume, high, low}}
         self.monitored_channels = []
         self.headers = {
-            'User-Agent': 'Mozilla/5.0',
+            'User-Agent': 'curl/8.6.0',
             'Connection': 'close',
             'X-Auth-Apikey': config.API_KEY,
         }

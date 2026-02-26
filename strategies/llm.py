@@ -44,7 +44,7 @@ class LLMAgent(BaseStrategy):
     """
 
     # Haiku model (10× cheaper than Sonnet)
-    HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5"
+    HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     def __init__(self):
         super().__init__("LLM", config.WEIGHT_LLM)
@@ -112,6 +112,7 @@ class LLMAgent(BaseStrategy):
         agreement = max(buy_votes, sell_votes)
 
         prompt = (
+            f"You are a crypto finance trader expert god level.\n"
             f"Market snapshot: Regime={regime}, Direction={direction}, "
             f"Agreement={agreement}/5 tools, RSI={rsi:.1f}, MACD={macd}, BB={bb_pct:.0f}%\n\n"
             f"Question: Is this a SUFFICIENTLY STRONG and REGIME-ALIGNED signal to warrant a "
@@ -183,7 +184,7 @@ class LLMAgent(BaseStrategy):
                              'Support/Resistance', 'Candle Patterns')
         ])
 
-        prompt = f"""You are an expert crypto scalp trader AI. Market regime: {regime}.
+        prompt = f"""You are a crypto finance trader expert god level. Market regime: {regime}.
 
 <MARKET_CONTEXT>
 Symbol: {symbol}
