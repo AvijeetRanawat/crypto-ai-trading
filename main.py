@@ -16,11 +16,13 @@ async def main():
     
     try:
         # Run all tasks concurrently
-        await asyncio.gather(
+        tasks = [
             client.connect_ws(channels),
             engine.run_loop(),
-            engine._periodic_self_improvement_loop(),   # ← background self-improvement
-        )
+        ]
+        if config.ENABLE_PERIODIC_REVIEW:
+            tasks.append(engine._periodic_self_improvement_loop())
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user.")
     except Exception as e:

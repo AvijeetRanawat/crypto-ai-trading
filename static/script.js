@@ -202,6 +202,10 @@ async function checkFreshStart() {
             el('win-rate-val').textContent = '--%';
             el('trades-count-val').textContent = '0';
             el('missed-count-val').textContent = '0';
+            el('llm-cost-val').textContent = '$0.0000';
+            el('llm-cpt-val').textContent = '—';
+            el('llm-cpp-val').textContent = '—';
+            el('llm-conv-val').textContent = '0.0%';
         }
         // else: same session, browser refresh — do nothing, charts will refill from API
     } catch (e) { }
@@ -270,6 +274,14 @@ async function updatePortfolioSummary() {
         el('win-rate-val').textContent = d.total_trades > 0 ? d.win_rate.toFixed(1) + '%' : '--%';
         el('trades-count-val').textContent = d.total_trades;
         el('missed-count-val').textContent = d.missed_count;
+        el('llm-cost-val').textContent = `$${(d.llm_cost_today ?? 0).toFixed(4)}`;
+        el('llm-cpt-val').textContent = d.llm_cost_per_traded_signal != null
+            ? `$${d.llm_cost_per_traded_signal.toFixed(4)}`
+            : '—';
+        el('llm-cpp-val').textContent = d.llm_cost_per_dollar_pnl != null
+            ? `${d.llm_cost_per_dollar_pnl.toFixed(4)}x`
+            : '—';
+        el('llm-conv-val').textContent = `${(d.llm_trade_conversion_rate ?? 0).toFixed(1)}%`;
 
         const balance = 1250 + d.total_pnl;
         el('balance-val').textContent = '$' + balance.toLocaleString('en-US', { maximumFractionDigits: 2 });

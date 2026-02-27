@@ -55,32 +55,45 @@ class PriceVelocity:
 
     @staticmethod
     def analyze(history: list, current_price: float) -> dict:
-        result = {"velocity_2m": 0.0, "velocity_5m": 0.0, "velocity_15m": 0.0, "acceleration": "flat"}
-        if len(history) < 60:
+        result = {
+            "velocity_30s": 0.0,
+            "velocity_1m": 0.0,
+            "velocity_5m": 0.0,
+            # Compatibility keys (legacy callers)
+            "velocity_2m": 0.0,
+            "velocity_15m": 0.0,
+            "acceleration": "FLAT — insufficient data",
+        }
+        if len(history) < 2:
             return result
-        
-        if len(history) >= 2:
-            p2 = history[-2]
-            result["velocity_2m"] = round(((current_price - p2) / p2) * 100, 4) if p2 else 0
-        
-        if len(history) >= 5:
-            p5 = history[-5]
+
+        # With 1m polling, shortest reliable step is one tick.
+        p_prev = history[-2]
+        if p_prev:
+            one_tick_pct = round(((current_price - p_prev) / p_prev) * 100, 4)
+            result["velocity_30s"] = one_tick_pct
+            result["velocity_1m"] = one_tick_pct
+            result["velocity_2m"] = one_tick_pct
+
+        if len(history) >= 6:
+            p5 = history[-6]
             result["velocity_5m"] = round(((current_price - p5) / p5) * 100, 4) if p5 else 0
-        
-        if len(history) >= 15:
-            p15 = history[-15]
+
+        if len(history) >= 16:
+            p15 = history[-16]
             result["velocity_15m"] = round(((current_price - p15) / p15) * 100, 4) if p15 else 0
-        
-        v2 = abs(result["velocity_2m"])
-        v5 = abs(result["velocity_5m"])
-        
-        if v2 > v5 * 1.5:
+
+        v_short = abs(result["velocity_1m"])
+        v_long = abs(result["velocity_5m"])
+        if v_long == 0:
+            result["acceleration"] = "STEADY — no 5m drift yet"
+        elif v_short > v_long * 1.5:
             result["acceleration"] = "ACCELERATING — momentum building"
-        elif v2 < v5 * 0.5:
+        elif v_short < v_long * 0.5:
             result["acceleration"] = "DECELERATING — momentum fading"
         else:
             result["acceleration"] = "STEADY — stable speed"
-        
+
         return result
 
 

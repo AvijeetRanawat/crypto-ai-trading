@@ -1,15 +1,17 @@
 class Signal:
-    def __init__(self, action: str, confidence: float, weight: float, reason: str):
+    def __init__(self, action: str, confidence: float, weight: float, reason: str, meta: dict = None):
         """
         :param action: 'BUY', 'SELL', or 'HOLD'
         :param confidence: 0.0 to 1.0 probability of success
         :param weight: Multiplier for this strategy's importance
         :param reason: Human-readable explanation
+        :param meta: Optional structured metadata for downstream attribution.
         """
         self.action = action.upper()
         self.confidence = max(0.0, min(1.0, confidence))
         self.weight = weight
         self.reason = reason
+        self.meta = meta or {}
 
     def __repr__(self):
         return f"<Signal {self.action} Conf:{self.confidence:.2f} W:{self.weight} Reason:'{self.reason}'>"

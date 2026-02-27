@@ -1,17 +1,17 @@
 import multiprocessing
 import uvicorn
 import asyncio
-import main
-from dashboard_api import app
 from logger import logger
 
 def run_dashboard():
+    from dashboard_api import app
     logger.info("Starting Dashboard Backend on http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
 async def run_agent():
+    import main as main_module
     logger.info("Starting Trading Agent...")
-    await main.main()
+    await main_module.main()
 
 def start_agent_loop():
     asyncio.run(run_agent())
@@ -19,6 +19,9 @@ def start_agent_loop():
 if __name__ == "__main__":
     import os, sys
     from datetime import datetime
+
+    # Shared runtime session id for all child processes (engine + dashboard).
+    os.environ["TRADING_SESSION_ID"] = datetime.now().strftime("%Y%m%dT%H%M%S")
 
     # ── PID Lock: prevent multiple instances running simultaneously ──
     pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.pid")
@@ -41,6 +44,10 @@ if __name__ == "__main__":
     with open(log_path, "w") as f:
         f.write(f"=== Session started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
     print(f"🗑  Log cleared. PID {os.getpid()} locked. Fresh session starting...")
+
+    # Ensure latest DB schema (migrations) exists before reset/start.
+    from database import init_db
+    init_db()
 
     # ── Reset Session Data ──
     from reset_session import reset_session

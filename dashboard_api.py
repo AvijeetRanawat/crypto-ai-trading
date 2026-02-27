@@ -21,6 +21,7 @@ import time
 # ── Session start time — set once when this process boots ────────────────────
 SESSION_START = datetime.now().isoformat()
 SESSION_START_MS = int(time.time() * 1000)
+SESSION_ID = database.get_runtime_context()["session_id"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -75,8 +76,9 @@ async def get_trades():
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
         WHERE status='CLOSED' AND entry_time >= ?
+        AND (session_id = ? OR session_id IS NULL)
         ORDER BY id DESC LIMIT 50
-    """, (SESSION_START,))
+    """, (SESSION_START, SESSION_ID))
     rows = cur.fetchall()
     conn.close()
     return [
@@ -113,8 +115,10 @@ async def get_portfolio_summary():
     # Session closed trades
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
-        FROM trades WHERE status='CLOSED' AND entry_time >= ?
-    """, (SESSION_START,))
+        FROM trades
+        WHERE status='CLOSED' AND entry_time >= ?
+        AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_START, SESSION_ID))
     closed = cur.fetchall()
 
     wins = [t for t in closed if (t[8] or 0) > 0]
@@ -125,22 +129,76 @@ async def get_portfolio_summary():
     cur.execute("""
         SELECT COUNT(*) FROM signal_events
         WHERE outcome='MISSED' AND timestamp >= ?
-    """, (SESSION_START,))
+        AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_START, SESSION_ID))
     missed_count = cur.fetchone()[0]
 
-    # Open position
     cur.execute("""
+        SELECT COUNT(*) FROM signal_events
+        WHERE outcome='TRADED' AND timestamp >= ?
+        AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_START, SESSION_ID))
+    traded_signals = cur.fetchone()[0]
+
+    # LLM usage (session + day)
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    cur.execute("""
+        SELECT COALESCE(SUM(estimated_cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0)
+        FROM llm_usage
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_START, SESSION_ID))
+    llm_cost_session, llm_calls_session, llm_tokens_session = cur.fetchone()
+
+    cur.execute("""
+        SELECT COALESCE(SUM(estimated_cost_usd), 0), COUNT(*)
+        FROM llm_usage
+        WHERE timestamp >= ?
+    """, (midnight,))
+    llm_cost_today, llm_calls_today = cur.fetchone()
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM llm_usage
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        AND stage = 'sonnet_decision'
+    """, (SESSION_START, SESSION_ID))
+    llm_decision_calls_session = cur.fetchone()[0]
+
+    # Open position
+    cur.execute(
+        """
         SELECT symbol, side, price, entry_time FROM trades
-        WHERE status='OPEN' ORDER BY id DESC LIMIT 1
-    """)
+        WHERE status='OPEN' AND (session_id = ? OR session_id IS NULL)
+        ORDER BY id DESC LIMIT 1
+        """,
+        (SESSION_ID,),
+    )
     open_pos = cur.fetchone()
     conn.close()
+
+    cost_per_traded_signal = (llm_cost_session / traded_signals) if traded_signals else None
+    cost_per_dollar_pnl = (llm_cost_session / total_pnl) if total_pnl > 0 else None
+    llm_trade_conversion_rate = (
+        (traded_signals / llm_decision_calls_session) * 100
+        if llm_decision_calls_session > 0
+        else 0.0
+    )
 
     return {
         "total_pnl": round(total_pnl, 2),
         "win_rate": round(win_rate, 1),
         "total_trades": len(closed),
         "missed_count": missed_count,
+        "traded_signals": traded_signals,
+        "llm_cost_today": round(llm_cost_today or 0.0, 4),
+        "llm_calls_today": int(llm_calls_today or 0),
+        "llm_cost_session": round(llm_cost_session or 0.0, 4),
+        "llm_calls_session": int(llm_calls_session or 0),
+        "llm_tokens_session": int(llm_tokens_session or 0),
+        "llm_decision_calls_session": int(llm_decision_calls_session or 0),
+        "llm_cost_per_traded_signal": round(cost_per_traded_signal, 4) if cost_per_traded_signal is not None else None,
+        "llm_cost_per_dollar_pnl": round(cost_per_dollar_pnl, 4) if cost_per_dollar_pnl is not None else None,
+        "llm_trade_conversion_rate": round(llm_trade_conversion_rate, 2),
         "open_position": {
             "symbol": open_pos[0], "side": open_pos[1],
             "entry_price": open_pos[2], "entry_time": open_pos[3]
@@ -217,9 +275,9 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
     cur.execute("""
         SELECT timestamp, price, buy_votes, sell_votes, rsi, macd, bb_pct, outcome, claude_action, claude_conf
         FROM signal_events
-        WHERE symbol=? AND timestamp >= ?
+        WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
         ORDER BY id DESC LIMIT ?
-    """, (symbol, SESSION_START, limit))
+    """, (symbol, SESSION_START, SESSION_ID, limit))
     rows = cur.fetchall()
     conn.close()
     return [
@@ -231,6 +289,43 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
         }
         for r in reversed(rows)
     ]
+
+
+@app.get("/api/llm/summary")
+async def get_llm_summary():
+    """LLM spend and conversion metrics for the current session."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*), COALESCE(SUM(total_tokens),0)
+        FROM llm_usage
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_START, SESSION_ID))
+    cost_session, calls_session, tokens_session = cur.fetchone()
+
+    cur.execute("""
+        SELECT COUNT(*) FROM llm_usage
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        AND stage = 'sonnet_decision'
+    """, (SESSION_START, SESSION_ID))
+    decision_calls = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*) FROM signal_events
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL) AND outcome='TRADED'
+    """, (SESSION_START, SESSION_ID))
+    traded_signals = cur.fetchone()[0]
+    conn.close()
+
+    conversion = (traded_signals / decision_calls * 100) if decision_calls else 0.0
+    return {
+        "llm_cost_session": round(cost_session or 0.0, 4),
+        "llm_calls_session": int(calls_session or 0),
+        "llm_tokens_session": int(tokens_session or 0),
+        "llm_decision_calls_session": int(decision_calls or 0),
+        "traded_signals": int(traded_signals or 0),
+        "llm_trade_conversion_rate": round(conversion, 2),
+    }
 
 
 @app.get("/api/regime")

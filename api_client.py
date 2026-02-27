@@ -10,12 +10,14 @@ class CoinDCXClient:
         self.base_url = config.REST_BASE_URL
         self.latest_prices = {}   # {symbol: price}
         self.ticker_meta = {}     # {symbol: {change_24h, volume, high, low}}
-        self.monitored_channels = []
+        self.allowed_symbols = set(config.BLUE_CHIP_WHITELIST)
+        self.monitored_channels = list(self.allowed_symbols)
         self.headers = {
             'User-Agent': 'curl/8.6.0',
             'Connection': 'close',
             'X-Auth-Apikey': config.API_KEY,
         }
+        self._drift_alerted = set()
 
     def _get_with_retry(self, url, retries=3, timeout=20):
         """GET request with exponential backoff."""
@@ -68,16 +70,31 @@ class CoinDCXClient:
     async def connect_ws(self, channels=None):
         """Polls ticker frequently to capture micro-momentum + 24h metadata."""
         if channels:
-            self.monitored_channels = channels
+            requested = {str(s).upper() for s in channels}
+            self.monitored_channels = [s for s in requested if s in self.allowed_symbols]
+            dropped = sorted(requested - set(self.monitored_channels))
+            if dropped:
+                logger.warning(f"Dropped non-allowlisted channels: {dropped}")
         logger.info(f"Starting Price Feed ({config.POLL_INTERVAL_SECONDS}s interval)...")
         while True:
             try:
                 tickers = self.get_market_ticker()
                 if tickers:
+                    # Keep only allowlisted symbols in in-memory state.
+                    self.latest_prices = {s: p for s, p in self.latest_prices.items() if s in self.allowed_symbols}
+                    self.ticker_meta = {s: m for s, m in self.ticker_meta.items() if s in self.allowed_symbols}
                     for t in tickers:
-                        market = t.get('market')
+                        market = str(t.get('market', '')).upper()
+                        if market in self._drift_alerted:
+                            pass
+                        elif market and market not in self.allowed_symbols and market in set(self.monitored_channels):
+                            self._drift_alerted.add(market)
+                            logger.error(f"Symbol drift detected in feed: {market} not in allowlist {sorted(self.allowed_symbols)}")
+
                         if market in self.monitored_channels:
                             last_price = float(t.get('last_price', 0))
+                            if last_price <= 0:
+                                continue
                             self.latest_prices[market] = last_price
                             database.save_price(market, last_price)
                             

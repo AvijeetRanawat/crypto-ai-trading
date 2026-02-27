@@ -3,7 +3,17 @@ from datetime import datetime, timedelta
 from collections import deque
 from logger import logger, log_trade
 from config import config
-from database import save_trade, update_trade_exit, save_portfolio_snapshot, update_intent, save_signal_event
+from database import (
+    save_trade,
+    update_trade_exit,
+    save_portfolio_snapshot,
+    update_intent,
+    save_signal_event,
+    save_llm_usage,
+    get_llm_cost_today,
+    get_llm_call_count_last_hour,
+    get_runtime_context,
+)
 
 from strategies.momentum import MomentumAgent
 from strategies.swing import SwingAgent
@@ -28,7 +38,22 @@ class PaperTradingSimulator:
         self.balance_usdt = 1_250.0
         self.positions = {}
 
-    def enter_position(self, symbol, price, amount_usdt, reason, side="LONG"):
+    def enter_position(
+        self,
+        symbol,
+        price,
+        amount_usdt,
+        reason,
+        side="LONG",
+        decision_source=None,
+        deterministic_conf=None,
+        llm_conf=None,
+        llm_cost_usd=None,
+    ):
+        if not config.is_symbol_allowed(symbol):
+            logger.error(f"Blocked non-allowlisted trade symbol: {symbol}")
+            return False
+
         if self.balance_usdt < amount_usdt:
             logger.warning(f"Insufficient balance for {symbol}")
             return False
@@ -37,7 +62,18 @@ class PaperTradingSimulator:
         self.balance_usdt -= amount_usdt
         entry_time = datetime.now()
         
-        db_id = save_trade(symbol, side, price, quantity, entry_time, reason)
+        db_id = save_trade(
+            symbol,
+            side,
+            price,
+            quantity,
+            entry_time,
+            reason,
+            decision_source=decision_source,
+            deterministic_conf=deterministic_conf,
+            llm_conf=llm_conf,
+            llm_cost_usd=llm_cost_usd,
+        )
 
         self.positions[symbol] = {
             "side": side,
@@ -100,10 +136,12 @@ class TradingEngine:
     def __init__(self, client):
         self.client = client
         self.simulator = PaperTradingSimulator()
-        self.client.monitored_channels = config.BLUE_CHIP_WHITELIST
+        self.runtime_ctx = get_runtime_context()
+        self.allowed_symbols = set(config.BLUE_CHIP_WHITELIST)
+        self.client.monitored_channels = list(self.allowed_symbols)
         
         history_size = int((config.MOMENTUM_WINDOW_MINS * 60) / config.POLL_INTERVAL_SECONDS)
-        self.price_history = {symbol: deque(maxlen=history_size) for symbol in config.BLUE_CHIP_WHITELIST}
+        self.price_history = {symbol: deque(maxlen=history_size) for symbol in self.allowed_symbols}
         
         # Algorithmic tools
         self.algo_agents = [MomentumAgent(), SwingAgent()]
@@ -117,10 +155,13 @@ class TradingEngine:
         try:
             self.llm_agent = LLMAgent()
             if self.llm_agent.bedrock:
-                self.retro_agent = RetrospectiveAgent(self.llm_agent.bedrock)
-                self.meta_optimizer = MetaOptimizer(self.llm_agent.bedrock)
-                self.missed_analyzer = MissedOpportunityAnalyzer(self.llm_agent.bedrock, config.BEDROCK_MODEL_ID)
-                logger.info("✅ Engine v5: LLM + Retro + Meta-Optimizer + MissedOpportunityAnalyzer + 10 Tools")
+                if config.ENABLE_RETROSPECTIVE:
+                    self.retro_agent = RetrospectiveAgent(self.llm_agent.bedrock)
+                if config.ENABLE_META_OPTIMIZER:
+                    self.meta_optimizer = MetaOptimizer(self.llm_agent.bedrock)
+                if config.ENABLE_MISSED_OPPORTUNITY_ANALYZER:
+                    self.missed_analyzer = MissedOpportunityAnalyzer(self.llm_agent.bedrock, config.BEDROCK_MODEL_ID)
+                logger.info("✅ Engine initialized with LLM (profit-first mode)")
             else:
                 logger.error("Bedrock failed.")
         except Exception as e:
@@ -135,10 +176,19 @@ class TradingEngine:
         self.last_entry_prices: dict = {}      # symbol -> (price, side, timestamp)
         self.direction_block: dict = {}         # symbol -> {side, blocked_until}
         self.last_close_time = None             # Fix 5: post-close cooldown
+        self.symbol_drift_alerted = set()
+        self.consecutive_losses = 0
+        self.trading_halted_reason = None
+        self.session_start_balance = self.simulator.balance_usdt
         
-        logger.info(f"Engine v5 ready. Watching: {config.BLUE_CHIP_WHITELIST}")
+        logger.info(f"Engine ready. Watching: {sorted(self.allowed_symbols)}")
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
         logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
+        logger.info(
+            f"  LLM budget/day: ${config.LLM_DAILY_BUDGET_USD:.2f} | "
+            f"LLM max calls/hour: {config.LLM_MAX_CALLS_PER_HOUR} | "
+            f"Max drawdown: ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
+        )
 
     def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result,
                             stochrsi_result=None, ema_result=None, volmom_result=None) -> tuple:
@@ -178,6 +228,88 @@ class TradingEngine:
 
         return buy_count, sell_count
 
+    def _safe_tool_call(self, name: str, fn, fallback):
+        try:
+            out = fn()
+            return fallback if out is None else out
+        except Exception as e:
+            logger.error(f"Tool failure ({name}): {e}")
+            return fallback
+
+    def _register_llm_usage(self, symbol: str, usage_events: list, context: str):
+        for ev in usage_events or []:
+            try:
+                save_llm_usage(
+                    stage=ev.get("stage", "unknown"),
+                    model_id=ev.get("model_id", ""),
+                    input_tokens=ev.get("input_tokens", 0),
+                    output_tokens=ev.get("output_tokens", 0),
+                    total_tokens=ev.get("total_tokens", 0),
+                    latency_ms=ev.get("latency_ms", 0),
+                    estimated_cost_usd=ev.get("estimated_cost_usd", 0.0),
+                    symbol=symbol,
+                    decision_context=context,
+                )
+            except Exception as e:
+                logger.error(f"Failed to save llm_usage: {e}")
+
+    def _llm_budget_ok(self) -> tuple:
+        calls_last_hour = get_llm_call_count_last_hour()
+        if calls_last_hour >= config.LLM_MAX_CALLS_PER_HOUR:
+            return False, f"LLM hourly cap reached ({calls_last_hour}/{config.LLM_MAX_CALLS_PER_HOUR})"
+
+        spend_today = get_llm_cost_today()
+        if spend_today >= config.LLM_DAILY_BUDGET_USD:
+            return False, f"LLM daily budget reached (${spend_today:.2f}/${config.LLM_DAILY_BUDGET_USD:.2f})"
+
+        return True, ""
+
+    def _estimate_expected_edge_pct(self, buy_count: int, sell_count: int, tp_pct: float, sl_pct: float) -> float:
+        agreement = max(buy_count, sell_count)
+        disagreement = min(buy_count, sell_count)
+        quality = max(0.0, (agreement - disagreement) / 8.0)
+        expected_move_pct = (tp_pct * 100) * max(0.5, quality + 0.3)
+        risk_drag_pct = (sl_pct * 100) * (1.0 - quality)
+        return expected_move_pct - risk_drag_pct - config.FEE_SLIPPAGE_BUFFER_PCT
+
+    def _deterministic_decision(self, buy_count: int, sell_count: int) -> tuple:
+        agreement = max(buy_count, sell_count)
+        disagreement = min(buy_count, sell_count)
+        margin = agreement - disagreement
+
+        if agreement < 3:
+            return "NEUTRAL", 0.0, "insufficient deterministic agreement"
+
+        if buy_count > sell_count:
+            action = "BUY"
+        elif sell_count > buy_count:
+            action = "SELL"
+        else:
+            return "NEUTRAL", 0.0, "conflicting deterministic votes"
+
+        # Strong confluence bypasses LLM completely.
+        if agreement >= 5 and margin >= 2:
+            conf = min(0.92, 0.60 + (agreement * 0.05) + (margin * 0.03))
+            return action, conf, "deterministic strong confluence"
+
+        # Borderline setup: LLM tie-breaker allowed.
+        conf = min(0.82, 0.50 + (agreement * 0.04) + (margin * 0.02))
+        return action, conf, "deterministic borderline setup"
+
+    def _check_kill_switch(self) -> tuple:
+        drawdown = max(0.0, self.session_start_balance - self.simulator.balance_usdt)
+        if drawdown >= config.MAX_DAILY_DRAWDOWN_USD:
+            return True, f"Kill-switch: drawdown ${drawdown:.2f} >= ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
+
+        spend_today = get_llm_cost_today()
+        if spend_today >= config.LLM_DAILY_BUDGET_USD:
+            return True, f"Kill-switch: LLM budget exceeded (${spend_today:.2f})"
+
+        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+            return True, f"Kill-switch: consecutive losses {self.consecutive_losses}"
+
+        return False, ""
+
     async def _close_trade(self, symbol, current_price, reason):
         """Helper to close a position and run retrospective."""
         trade_result = self.simulator.exit_position(symbol, current_price, reason)
@@ -194,6 +326,7 @@ class TradingEngine:
 
             # ── Direction block: if this is a loss, track consecutive losses per direction ──
             if trade_result["pnl"] <= 0:
+                self.consecutive_losses += 1
                 side = trade_result["side"]
                 block_key = f"{symbol}_{side}"
                 self._loss_streak = getattr(self, '_loss_streak', {})
@@ -204,6 +337,7 @@ class TradingEngine:
                     logger.warning(f"🚫 DIRECTION BLOCK: {side} on {symbol} for 10 min after {self._loss_streak[block_key]} consecutive losses")
                     self._loss_streak[block_key] = 0  # reset after block
             else:
+                self.consecutive_losses = 0
                 # Win — reset the loss streak for this symbol's direction
                 side = trade_result["side"]
                 block_key = f"{symbol}_{side}"
@@ -227,6 +361,10 @@ class TradingEngine:
         Calls run_mini_review() which: analyzes recent trades with Claude,
         saves new lessons, auto-tunes config, commits to GitHub.
         """
+        if not config.ENABLE_PERIODIC_REVIEW:
+            logger.info("⏸ Periodic self-improvement loop disabled (ENABLE_PERIODIC_REVIEW=false).")
+            return
+
         from session_review import run_mini_review
 
         REVIEW_SECS   = getattr(config, 'PERIODIC_REVIEW_SECONDS', 600)   # 10 min
@@ -289,16 +427,22 @@ class TradingEngine:
                 )
 
                 try:
+                    prev_reviewed_trade_id = last_reviewed_trade_id
                     new_id = run_mini_review(
                         bedrock_client=self.llm_agent.bedrock,
                         since_trade_id=last_reviewed_trade_id,
                         label=f"PERIODIC-{review_count}",
+                        min_closed_trades=config.MIN_NEW_CLOSED_TRADES_FOR_REVIEW,
                     )
                     last_reviewed_trade_id = new_id
                     
-                    # ── v7: Re-distill lessons into master rules after review ──
-                    from distill_lessons import distill_all
-                    distill_all()
+                    # Re-distill only when explicitly enabled and enough new closed trades.
+                    if config.ENABLE_DISTILLATION:
+                        from distill_lessons import distill_all
+                        distill_all(
+                            since_trade_id=prev_reviewed_trade_id,
+                            min_new_closed_trades=config.MIN_NEW_CLOSED_TRADES_FOR_DISTILLATION,
+                        )
                     
                 except Exception as e:
                     logger.error(f"Post-review improvement failed: {e}", exc_info=True)
@@ -306,17 +450,18 @@ class TradingEngine:
                 last_review_time     = now
                 last_closed_snapshot = self.trades_closed
 
-                # Reload config so any auto-tuned values take effect immediately
-                try:
-                    import importlib, config as cfg_module
-                    importlib.reload(cfg_module)
-                    from config import config as new_cfg
-                    logger.info(
-                        f"🔄 Config reloaded: conf={new_cfg.MIN_ENSEMBLE_CONFIDENCE} "
-                        f"SL={new_cfg.EARLY_STOP_LOSS_PCT} TP={new_cfg.TAKE_PROFIT_PCT}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Config reload failed: {e}")
+                if config.ENABLE_RUNTIME_CONFIG_AUTOTUNE:
+                    # Reload config so any auto-tuned values take effect immediately.
+                    try:
+                        import importlib, config as cfg_module
+                        importlib.reload(cfg_module)
+                        from config import config as new_cfg
+                        logger.info(
+                            f"🔄 Config reloaded: conf={new_cfg.MIN_ENSEMBLE_CONFIDENCE} "
+                            f"SL={new_cfg.EARLY_STOP_LOSS_PCT} TP={new_cfg.TAKE_PROFIT_PCT}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Config reload failed: {e}")
 
             except asyncio.CancelledError:
                 logger.info("🔁 Periodic self-improvement loop cancelled.")
@@ -327,9 +472,10 @@ class TradingEngine:
 
     async def run_loop(self):
         logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max)...")
+        primary_symbol = sorted(self.allowed_symbols)[0]
         
         # ── v7 Warmup: Fetch 1m historical klines to skip 35min wait ──
-        for symbol in config.BLUE_CHIP_WHITELIST:
+        for symbol in sorted(self.allowed_symbols):
             klines = self.client.get_historical_klines(symbol, interval='1m', limit=60)
             if klines:
                 self.price_history[symbol].extend(klines)
@@ -338,17 +484,32 @@ class TradingEngine:
         while self.trades_closed < config.MAX_TRADES_RUN:
             try:
                 for symbol, price in self.client.latest_prices.items():
+                    if symbol not in self.allowed_symbols:
+                        if symbol not in self.symbol_drift_alerted:
+                            self.symbol_drift_alerted.add(symbol)
+                            logger.error(f"🚨 Symbol drift reached engine: {symbol} not in allowlist {sorted(self.allowed_symbols)}")
+                        continue
                     if price > 0:
+                        if symbol not in self.price_history:
+                            self.price_history[symbol] = deque(
+                                maxlen=int((config.MOMENTUM_WINDOW_MINS * 60) / config.POLL_INTERVAL_SECONDS)
+                            )
                         self.price_history[symbol].append(price)
 
                 min_ticks = 35  # Enough for MACD (26 periods + 9 signal)
-                ticks_ready = len(self.price_history[config.BLUE_CHIP_WHITELIST[0]]) if self.price_history else 0
+                ticks_ready = len(self.price_history.get(primary_symbol, [])) if self.price_history else 0
                 if ticks_ready < min_ticks:
                     update_intent(f"Warming up... ({ticks_ready}/{min_ticks} ticks)", [])
                     await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
                     continue
 
                 prices = self.client.latest_prices
+
+                kill, reason = self._check_kill_switch()
+                if kill and not self.trading_halted_reason:
+                    self.trading_halted_reason = reason
+                    logger.error(reason)
+                    update_intent(f"🛑 {reason}", [])
 
                 # ── 1. Manage open positions ──────────────────────────────────
                 for symbol in list(self.simulator.positions.keys()):
@@ -364,6 +525,10 @@ class TradingEngine:
                     else:
                         pnl_pct = (entry - current_price) / entry
 
+                    if self.trading_halted_reason:
+                        await self._close_trade(symbol, current_price, f"🛑 Kill-switch exit: {self.trading_halted_reason}")
+                        continue
+
                     # Per-position dynamic SL/TP (set at entry from ATR, fallback to config)
                     sl_pct = pos.get("dynamic_sl", config.EARLY_STOP_LOSS_PCT)
                     tp_pct = pos.get("dynamic_tp", config.TAKE_PROFIT_PCT)
@@ -378,7 +543,7 @@ class TradingEngine:
                     # ── v6: PYRAMID INTO WINNERS ──────────────────────────────
                     # At 50% of TP reached and signals still strong → add to position
                     pyramid_count = pos.get("pyramid_count", 0)
-                    if (pnl_pct >= tp_pct * 0.5 and pyramid_count < 2
+                    if (config.ENABLE_PYRAMIDING and pnl_pct >= tp_pct * 0.5 and pyramid_count < 2
                             and self.simulator.balance_usdt > 125):
                         # Quick signal check (no LLM needed here)
                         hist = list(self.price_history.get(symbol, []))
@@ -435,7 +600,11 @@ class TradingEngine:
 
                 # ── 2. Enter new positions ────────────────────────────────────
                 if len(self.simulator.positions) == 0 and self.trades_closed < config.MAX_TRADES_RUN:
-                    for symbol in config.BLUE_CHIP_WHITELIST:
+                    if self.trading_halted_reason:
+                        update_intent(f"🛑 Trading halted: {self.trading_halted_reason}", [])
+                        break
+
+                    for symbol in sorted(self.allowed_symbols):
                         current_price = prices.get(symbol, 0)
                         history = list(self.price_history[symbol])
                         meta = self.client.ticker_meta.get(symbol, {})
@@ -444,8 +613,16 @@ class TradingEngine:
                             continue
 
                         # ── RUN CORE TOOLS ─────────────────────────────────
-                        vol_result  = VolatilityScanner.analyze(history)
-                        vol_prof    = VolumeProfile.analyze(meta)
+                        vol_result = self._safe_tool_call(
+                            "VolatilityScanner",
+                            lambda: VolatilityScanner.analyze(history),
+                            {"volatility_pct": 0.0, "verdict": "Tool error", "tradeable": False},
+                        )
+                        vol_prof = self._safe_tool_call(
+                            "VolumeProfile",
+                            lambda: VolumeProfile.analyze(meta),
+                            {"volume_24h": 0.0, "spread_pct": 0.0, "verdict": "Tool error", "liquid": False},
+                        )
 
                         # Dead market filter
                         if not vol_result["tradeable"] and not vol_prof.get("liquid", False):
@@ -460,15 +637,47 @@ class TradingEngine:
                         conf_multiplier = session_filt["confidence_multiplier"]
 
                         # ── RUN PRO TA TOOLS ───────────────────────────────
-                        rsi_result    = RSIAnalyzer.analyze(history)
-                        macd_result   = MACDSignal.analyze(history)
-                        bb_result     = BollingerBands.analyze(history, current_price)
-                        sr_result     = SupportResistance.analyze(history, current_price)
-                        candle_result = CandlePatterns.analyze(history)
+                        rsi_result = self._safe_tool_call(
+                            "RSIAnalyzer",
+                            lambda: RSIAnalyzer.analyze(history),
+                            {"rsi": 50.0, "signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
+                        macd_result = self._safe_tool_call(
+                            "MACDSignal",
+                            lambda: MACDSignal.analyze(history),
+                            {"crossover": "NONE", "verdict": "Tool error"},
+                        )
+                        bb_result = self._safe_tool_call(
+                            "BollingerBands",
+                            lambda: BollingerBands.analyze(history, current_price),
+                            {"position_pct": 50.0, "signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
+                        sr_result = self._safe_tool_call(
+                            "SupportResistance",
+                            lambda: SupportResistance.analyze(history, current_price),
+                            {"signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
+                        candle_result = self._safe_tool_call(
+                            "CandlePatterns",
+                            lambda: CandlePatterns.analyze(history),
+                            {"signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
                         # v7 new voters
-                        stochrsi_result = StochasticRSI.analyze(history)
-                        ema_result      = EMACross.analyze(history)
-                        volmom_result   = VolumeMomentum.analyze(history)
+                        stochrsi_result = self._safe_tool_call(
+                            "StochasticRSI",
+                            lambda: StochasticRSI.analyze(history),
+                            {"signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
+                        ema_result = self._safe_tool_call(
+                            "EMACross",
+                            lambda: EMACross.analyze(history),
+                            {"signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
+                        volmom_result = self._safe_tool_call(
+                            "VolumeMomentum",
+                            lambda: VolumeMomentum.analyze(history),
+                            {"signal": "NEUTRAL", "verdict": "Tool error"},
+                        )
 
                         buy_count, sell_count = self._count_pro_signals(
                             rsi_result, macd_result, bb_result, sr_result, candle_result,
@@ -501,7 +710,11 @@ class TradingEngine:
                             continue  # Not enough signals for either direction
 
                         # ── v6: MARKET REGIME FILTER ───────────────────────
-                        regime_result = MarketRegimeDetector.analyze(history)
+                        regime_result = self._safe_tool_call(
+                            "MarketRegimeDetector",
+                            lambda: MarketRegimeDetector.analyze(history),
+                            {"regime": "UNKNOWN", "trade_direction": "ANY", "strength": 0.0, "verdict": "Tool error"},
+                        )
                         regime = regime_result["regime"]
                         allowed_dir   = regime_result["trade_direction"]
 
@@ -517,28 +730,27 @@ class TradingEngine:
                             continue
 
                         # ── v6: ATR-BASED DYNAMIC STOPS ────────────────────
-                        atr_result = ATRTracker.analyze(history)
+                        atr_result = self._safe_tool_call(
+                            "ATRTracker",
+                            lambda: ATRTracker.analyze(history),
+                            {"stop_loss_pct": config.EARLY_STOP_LOSS_PCT, "take_profit_pct": config.TAKE_PROFIT_PCT, "verdict": "Tool error"},
+                        )
                         dynamic_sl  = atr_result["stop_loss_pct"]
                         dynamic_tp  = atr_result["take_profit_pct"]
 
                         # ── v6: MULTI-TIMEFRAME CONFIRMATION ───────────────
-                        mtf_result = MultiTimeframeConfirmer.analyze(history, proposed_dir)
+                        mtf_result = self._safe_tool_call(
+                            "MultiTimeframeConfirmer",
+                            lambda: MultiTimeframeConfirmer.analyze(history, proposed_dir),
+                            {"confirms": True, "htf_trend": "UNKNOWN", "verdict": "Tool error"},
+                        )
                         if not mtf_result["confirms"] and mtf_result["htf_trend"] != "UNKNOWN":
                             update_intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
                             # Soft reject: add to miss count but don't hard-block
                             self.skipped_cycles += 1
                             continue
 
-                        # ── LLM THROTTLE ───────────────────────────────────
                         now = datetime.now()
-                        if self.last_llm_call and (now - self.last_llm_call).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
-                            wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
-                            if self.skipped_cycles % 2 == 0:
-                                update_intent(
-                                    f"⚡ SETUP: {proposed_dir} ({buy_count if proposed_dir=='LONG' else sell_count}/8) | {regime} | LLM in {wait_left}s...",
-                                    [symbol]
-                                )
-                            continue
 
                         # ── DIRECTION BLOCK ─────────────────────────────────
                         block = self.direction_block.get(symbol)
@@ -547,165 +759,281 @@ class TradingEngine:
                             update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
                             continue
 
-                        # ── Fix 5: POST-CLOSE COOLDOWN (300s) ───────────────
+                        # ── POST-CLOSE COOLDOWN (300s) ─────────────────────
                         if self.last_close_time and (now - self.last_close_time).total_seconds() < 300:
                             remaining_cd = 300 - int((now - self.last_close_time).total_seconds())
                             if self.skipped_cycles % 3 == 0:
                                 update_intent(f"⏸ Post-close cooldown: {remaining_cd}s remaining", [symbol])
                             continue
 
-                        # ── Fix 1: HARD DUPLICATE BLOCKER ──────────────────
-                        # New: 600s (10m) lockout + 0.15% relative price threshold
+                        # ── HARD DUPLICATE BLOCKER ──────────────────────────
                         last_entry = self.last_entry_prices.get(symbol)
                         if last_entry:
                             last_price, last_side, last_time = last_entry
                             time_since = (now - last_time).total_seconds()
                             price_diff_pct = abs(current_price - last_price) / last_price
-                            # Hard time lock: no entry within 600s of last entry (any direction)
                             if time_since < 600:
                                 update_intent(f"⏸ Entry blocked: {int(600 - time_since)}s lockout remaining", [symbol])
                                 continue
-                            # Same-direction price proximity: block if within 0.15%
                             if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 1200:
                                 update_intent(f"⏸ Duplicate blocked: {proposed_dir} only {price_diff_pct*100:.3f}% from last entry", [symbol])
                                 continue
 
-                        # ── ALL TOOLS FOR CLAUDE ────────────────────────────
-                        vel_result    = PriceVelocity.analyze(history, current_price)
-                        ob_result     = OrderBookPressure.analyze(meta, current_price)
+                        vel_result = self._safe_tool_call(
+                            "PriceVelocity",
+                            lambda: PriceVelocity.analyze(history, current_price),
+                            {"velocity_30s": 0.0, "velocity_1m": 0.0, "velocity_5m": 0.0, "acceleration": "UNAVAILABLE"},
+                        )
+                        ob_result = self._safe_tool_call(
+                            "OrderBookPressure",
+                            lambda: OrderBookPressure.analyze(meta, current_price),
+                            {"pressure": "UNKNOWN", "bias": 0.0},
+                        )
                         session_stats = self.session_tracker.get_stats()
 
                         tool_outputs = [
-                            {"name": "Market Regime",
-                             "data": f"{regime_result['verdict']} (strength: {regime_result['strength']})"},
-                            {"name": "ATR Tracker",
-                             "data": atr_result['verdict']},
-                            {"name": "Multi-Timeframe",
-                             "data": mtf_result['verdict']},
-                            {"name": "Session Filter",
-                             "data": session_filt['verdict']},
-                            {"name": "Volatility Scanner",
-                             "data": f"Vol: {vol_result['volatility_pct']:.4f}% — {vol_result['verdict']}"},
-                            {"name": "Price Velocity",
-                             "data": f"30s: {vel_result['velocity_30s']:+.4f}% | 1m: {vel_result['velocity_1m']:+.4f}% | 5m: {vel_result['velocity_5m']:+.4f}% — {vel_result['acceleration']}"},
-                            {"name": "Volume Profile",
-                             "data": f"24h Vol: {vol_prof['volume_24h']} | Spread: {vol_prof['spread_pct']:.4f}% — {vol_prof['verdict']}"},
-                            {"name": "Order Book Pressure",
-                             "data": f"{ob_result['pressure']} (bias: {ob_result['bias']:+.4f}%)"},
-                            {"name": "RSI (14)",
-                             "data": rsi_result['verdict'], "signal": rsi_result["signal"]},
-                            {"name": "MACD Signal",
-                             "data": macd_result['verdict'], "signal": macd_result["crossover"]},
-                            {"name": "Bollinger Bands",
-                             "data": bb_result['verdict'], "signal": bb_result["signal"]},
-                            {"name": "Support & Resistance",
-                             "data": sr_result['verdict'], "signal": sr_result.get("signal", "NEUTRAL")},
-                            {"name": "Candle Patterns",
-                             "data": candle_result['verdict'], "signal": candle_result["signal"]},
-                             {"name": "Stochastic RSI",
-                              "data": stochrsi_result["verdict"], "signal": stochrsi_result["signal"]},
-                             {"name": "EMA Cross (9/21)",
-                              "data": ema_result["verdict"], "signal": ema_result["signal"]},
-                             {"name": "Volume Momentum",
-                              "data": volmom_result["verdict"], "signal": volmom_result["signal"]},
+                            {"name": "Market Regime", "data": f"{regime_result['verdict']} (strength: {regime_result['strength']})"},
+                            {"name": "ATR Tracker", "data": atr_result["verdict"]},
+                            {"name": "Multi-Timeframe", "data": mtf_result["verdict"]},
+                            {"name": "Session Filter", "data": session_filt["verdict"]},
+                            {"name": "Volatility Scanner", "data": f"Vol: {vol_result['volatility_pct']:.4f}% — {vol_result['verdict']}"},
+                            {
+                                "name": "Price Velocity",
+                                "data": (
+                                    f"30s: {vel_result.get('velocity_30s', 0.0):+.4f}% | "
+                                    f"1m: {vel_result.get('velocity_1m', 0.0):+.4f}% | "
+                                    f"5m: {vel_result.get('velocity_5m', 0.0):+.4f}% — "
+                                    f"{vel_result.get('acceleration', 'UNAVAILABLE')}"
+                                ),
+                            },
+                            {"name": "Volume Profile", "data": f"24h Vol: {vol_prof['volume_24h']} | Spread: {vol_prof['spread_pct']:.4f}% — {vol_prof['verdict']}"},
+                            {"name": "Order Book Pressure", "data": f"{ob_result['pressure']} (bias: {ob_result['bias']:+.4f}%)"},
+                            {"name": "RSI (14)", "data": rsi_result["verdict"], "signal": rsi_result["signal"]},
+                            {"name": "MACD Signal", "data": macd_result["verdict"], "signal": macd_result["crossover"]},
+                            {"name": "Bollinger Bands", "data": bb_result["verdict"], "signal": bb_result["signal"]},
+                            {"name": "Support & Resistance", "data": sr_result["verdict"], "signal": sr_result.get("signal", "NEUTRAL")},
+                            {"name": "Candle Patterns", "data": candle_result["verdict"], "signal": candle_result["signal"]},
+                            {"name": "Stochastic RSI", "data": stochrsi_result["verdict"], "signal": stochrsi_result["signal"]},
+                            {"name": "EMA Cross (9/21)", "data": ema_result["verdict"], "signal": ema_result["signal"]},
+                            {"name": "Volume Momentum", "data": volmom_result["verdict"], "signal": volmom_result["signal"]},
                         ]
                         for agent in self.algo_agents:
-                            sig = agent.analyze(symbol, current_price, history, meta)
-                            tool_outputs.append({"name": agent.name,
-                                                 "data": f"{sig.action} (conf: {sig.confidence:.2f}) — {sig.reason}"})
-                        trend_sig = self.trend_filter.analyze(symbol, current_price, history, meta)
-                        tool_outputs.append({"name": "Trend Filter",
-                                             "data": f"{trend_sig.action} — {trend_sig.reason}"})
-                        tool_outputs.append({"name": "Session Performance",
-                                             "data": f"WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | PnL: ${session_stats['cumulative_pnl']} — {session_stats['recommendation']}"})
-
-                        # ── CLAUDE MAKES THE FINAL CALL ──────────────────
-                        self.last_llm_call = now
-                        logger.info(f"⚡ SETUP: {proposed_dir} ({buy_count}B/{sell_count}S) | {regime} | {session_filt['session']} | ATR-SL:{dynamic_sl*100:.2f}% TP:{dynamic_tp*100:.2f}% | Sending to Claude...")
-
-                        if self.llm_agent:
-                            llm_signal = self.llm_agent.analyze_with_tools(
-                                symbol, current_price, history, meta, tool_outputs,
-                                buy_count=buy_count, sell_count=sell_count,
-                                regime=regime,
-                                rsi=rsi_result['rsi'],
-                                macd=macd_result['crossover'],
-                                bb_pct=bb_result['position_pct'],
+                            sig = self._safe_tool_call(
+                                agent.name,
+                                lambda a=agent: a.analyze(symbol, current_price, history, meta),
+                                None,
                             )
-                        else:
-                            continue
+                            if sig:
+                                tool_outputs.append(
+                                    {
+                                        "name": agent.name,
+                                        "data": f"{sig.action} (conf: {sig.confidence:.2f}) — {sig.reason}",
+                                    }
+                                )
+                        trend_sig = self.trend_filter.analyze(symbol, current_price, history, meta)
+                        tool_outputs.append({"name": "Trend Filter", "data": f"{trend_sig.action} — {trend_sig.reason}"})
+                        tool_outputs.append(
+                            {
+                                "name": "Session Performance",
+                                "data": (
+                                    f"WR: {session_stats['win_rate']} | Streak: {session_stats['streak']} | "
+                                    f"PnL: ${session_stats['cumulative_pnl']} — {session_stats['recommendation']}"
+                                ),
+                            }
+                        )
 
-                        # ── EFFECTIVE CONFIDENCE: session-adjusted ─────────
-                        effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
-
-                        # ── Fix 2: CONFIDENCE FLOOR = 0.70 ────────────────
-                        # Below 0.70: 202 trades at 28-36% WR, lost $3,583 total
-                        CONFIDENCE_FLOOR = 0.70
-
-                        if not llm_signal or llm_signal.action == "NEUTRAL" or llm_signal.confidence < CONFIDENCE_FLOOR or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE:
+                        det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count)
+                        if det_action == "NEUTRAL":
                             self.skipped_cycles += 1
-                            conf = llm_signal.confidence if llm_signal else 0
-                            action = llm_signal.action if llm_signal else "NEUTRAL"
-                            reject_reason = ""
-                            if llm_signal and llm_signal.confidence < CONFIDENCE_FLOOR and llm_signal.action != "NEUTRAL":
-                                reject_reason = f" | 🚫 CONF FLOOR: {conf:.2f} < {CONFIDENCE_FLOOR}"
-                            if self.skipped_cycles % 3 == 1:
-                                update_intent(f"⏳ Claude passed (raw:{conf:.2f} adj:{effective_conf:.2f}){reject_reason}. Skipped {self.skipped_cycles}x", [symbol])
-                            save_signal_event(symbol, current_price, buy_count, sell_count,
-                                              rsi_result['rsi'], macd_result['crossover'],
-                                              bb_result['position_pct'], 'MISSED',
-                                              claude_action=action, claude_conf=conf)
-                            self.missed_opportunities_count += 1
-                            if self.missed_opportunities_count % 5 == 0 and hasattr(self, 'missed_analyzer') and self.missed_analyzer:
-                                try:
-                                    logger.info(f"🔍 Running MissedOpportunityAnalyzer ({self.missed_opportunities_count} misses)...")
-                                    self.missed_analyzer.analyze(symbol)
-                                except Exception as e:
-                                    logger.error(f"MissedOpportunityAnalyzer error: {e}")
                             continue
 
-                        # ── v6: CONFIDENCE-SCALED + KELLY POSITION SIZING ──
-                        # Base sizing: 10k-28k based on confidence; Kelly fraction reduces after losses
-                        base_conf = llm_signal.confidence
+                        expected_edge_pct = self._estimate_expected_edge_pct(buy_count, sell_count, dynamic_tp, dynamic_sl)
+                        if expected_edge_pct < config.MIN_EXPECTED_EDGE_PCT:
+                            self.skipped_cycles += 1
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source="EDGE_REJECT",
+                                deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                                deterministic_conf=det_conf,
+                            )
+                            continue
+
+                        llm_signal = None
+                        llm_cost = 0.0
+                        llm_tokens = 0
+                        decision_source = "DETERMINISTIC"
+                        final_action = det_action
+                        final_conf = det_conf
+                        final_reason = f"Deterministic: {det_reason}"
+
+                        borderline_setup = det_conf < 0.75 or max(buy_count, sell_count) <= 4
+                        if borderline_setup:
+                            llm_ok, llm_reason = self._llm_budget_ok()
+                            if not llm_ok:
+                                self.skipped_cycles += 1
+                                update_intent(f"⏳ LLM blocked: {llm_reason}", [symbol])
+                                continue
+
+                            if self.last_llm_call and (now - self.last_llm_call).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
+                                wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
+                                if self.skipped_cycles % 2 == 0:
+                                    update_intent(
+                                        f"⚡ Borderline setup {proposed_dir} ({buy_count}B/{sell_count}S) | LLM in {wait_left}s...",
+                                        [symbol],
+                                    )
+                                continue
+
+                            if not self.llm_agent:
+                                self.skipped_cycles += 1
+                                continue
+
+                            self.last_llm_call = now
+                            llm_signal = self.llm_agent.analyze_with_tools(
+                                symbol,
+                                current_price,
+                                history,
+                                meta,
+                                tool_outputs,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                                regime=regime,
+                                rsi=rsi_result["rsi"],
+                                macd=macd_result["crossover"],
+                                bb_pct=bb_result["position_pct"],
+                            )
+                            usage_events = (llm_signal.meta or {}).get("llm_usage", [])
+                            self._register_llm_usage(symbol, usage_events, context=f"{buy_count}B/{sell_count}S|{regime}")
+                            llm_cost = sum(ev.get("estimated_cost_usd", 0.0) for ev in usage_events)
+                            llm_tokens = int(sum(ev.get("total_tokens", 0) for ev in usage_events))
+
+                            effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
+                            confidence_floor = 0.70
+                            if (
+                                not llm_signal
+                                or llm_signal.action == "NEUTRAL"
+                                or llm_signal.confidence < confidence_floor
+                                or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE
+                            ):
+                                self.skipped_cycles += 1
+                                conf = llm_signal.confidence if llm_signal else 0.0
+                                action = llm_signal.action if llm_signal else "NEUTRAL"
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "MISSED",
+                                    claude_action=action,
+                                    claude_conf=conf,
+                                    decision_source="LLM_REJECT",
+                                    deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                                    deterministic_conf=det_conf,
+                                    llm_cost_usd=llm_cost,
+                                    llm_tokens=llm_tokens,
+                                )
+                                self.missed_opportunities_count += 1
+                                if (
+                                    config.ENABLE_MISSED_OPPORTUNITY_ANALYZER
+                                    and self.missed_opportunities_count % 5 == 0
+                                    and hasattr(self, "missed_analyzer")
+                                    and self.missed_analyzer
+                                ):
+                                    try:
+                                        logger.info(f"🔍 Running MissedOpportunityAnalyzer ({self.missed_opportunities_count} misses)...")
+                                        self.missed_analyzer.analyze(symbol)
+                                    except Exception as e:
+                                        logger.error(f"MissedOpportunityAnalyzer error: {e}")
+                                continue
+
+                            decision_source = "LLM_TIEBREAKER"
+                            final_action = llm_signal.action
+                            final_conf = llm_signal.confidence
+                            final_reason = llm_signal.reason
+
+                        # ── Position sizing (risk-capped) ──────────────────
+                        base_conf = final_conf
                         if base_conf >= 0.80:
-                            pos_usdt = 350
-                        elif base_conf >= 0.65:
                             pos_usdt = 250
-                        elif base_conf >= 0.50:
+                        elif base_conf >= 0.70:
+                            pos_usdt = 200
+                        elif base_conf >= 0.60:
                             pos_usdt = 160
                         else:
                             pos_usdt = 125
 
-                        # Kelly adjustment: shrink after losing streaks
-                        streak_info = session_stats.get('streak', '')
-                        if 'LOSS' in str(streak_info) and any(str(n) in str(streak_info) for n in ['2','3','4','5']):
-                            pos_usdt = int(pos_usdt * 0.7)   # 30% reduction on losing streak
-                            logger.info(f"📉 Kelly: position shrunk to ${pos_usdt:,} (loss streak)")
+                        if self.consecutive_losses >= 2:
+                            pos_usdt = int(pos_usdt * 0.7)
+                            logger.info(f"📉 Risk cut: position shrunk to ${pos_usdt:,} (loss streak)")
 
-                        pos_usdt = max(125, min(pos_usdt, int(self.simulator.balance_usdt * 0.30)))  # never > 30% balance
+                        max_by_risk = int(self.simulator.balance_usdt * config.MAX_RISK_PER_TRADE_PCT_BALANCE)
+                        min_pos = int(config.MIN_POSITION_SIZE_USDT)
+                        if max_by_risk < min_pos:
+                            self.skipped_cycles += 1
+                            continue
+                        pos_usdt = max(min_pos, min(pos_usdt, max_by_risk, int(self.simulator.balance_usdt)))
+                        pos_usdt = min(pos_usdt, int(config.MAX_POSITION_SIZE_USDT))
+                        if pos_usdt < min_pos:
+                            self.skipped_cycles += 1
+                            continue
 
-                        # ── EXECUTE ─────────────────────────────────────────
-                        side = "LONG" if llm_signal.action == "BUY" else "SHORT"
-                        reason = (f"Claude({llm_signal.confidence:.2f} adj:{effective_conf:.2f}) | "
-                                  f"{buy_count}B/{sell_count}S | {regime} | {session_filt['session']} | "
-                                  f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}% | {llm_signal.reason}")
+                        side = "LONG" if final_action == "BUY" else "SHORT"
+                        reason = (
+                            f"{decision_source}({final_conf:.2f}) | {buy_count}B/{sell_count}S | "
+                            f"{regime} | {session_filt['session']} | Edge:{expected_edge_pct:+.3f}% | "
+                            f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}% | {final_reason}"
+                        )
 
                         self.trades_executed += 1
                         self.skipped_cycles = 0
-                        update_intent(f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{llm_signal.confidence:.2f} | {reason}", [symbol])
-                        self.simulator.enter_position(symbol, current_price, pos_usdt, reason, side=side)
+                        update_intent(
+                            f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{final_conf:.2f} | {decision_source}",
+                            [symbol],
+                        )
+                        self.simulator.enter_position(
+                            symbol,
+                            current_price,
+                            pos_usdt,
+                            reason,
+                            side=side,
+                            decision_source=decision_source,
+                            deterministic_conf=det_conf,
+                            llm_conf=final_conf if decision_source == "LLM_TIEBREAKER" else None,
+                            llm_cost_usd=llm_cost if decision_source == "LLM_TIEBREAKER" else 0.0,
+                        )
 
-                        # Store dynamic stops in position for use in management
                         if symbol in self.simulator.positions:
                             self.simulator.positions[symbol]["dynamic_sl"] = dynamic_sl
                             self.simulator.positions[symbol]["dynamic_tp"] = dynamic_tp
                             self.simulator.positions[symbol]["pyramid_count"] = 0
                             self.simulator.positions[symbol]["original_pos_usdt"] = pos_usdt
 
-                        save_signal_event(symbol, current_price, buy_count, sell_count,
-                                          rsi_result['rsi'], macd_result['crossover'],
-                                          bb_result['position_pct'], 'TRADED',
-                                          claude_action=side, claude_conf=llm_signal.confidence)
+                        save_signal_event(
+                            symbol,
+                            current_price,
+                            buy_count,
+                            sell_count,
+                            rsi_result["rsi"],
+                            macd_result["crossover"],
+                            bb_result["position_pct"],
+                            "TRADED",
+                            claude_action=side if decision_source == "LLM_TIEBREAKER" else None,
+                            claude_conf=final_conf if decision_source == "LLM_TIEBREAKER" else None,
+                            decision_source=decision_source,
+                            deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                            deterministic_conf=det_conf,
+                            llm_cost_usd=llm_cost,
+                            llm_tokens=llm_tokens,
+                        )
                         break
                         
             except Exception as e:
@@ -719,20 +1047,21 @@ class TradingEngine:
         logger.info(f"💼 Final Balance: ${self.simulator.balance_usdt:,.2f}")
         
         # ── 1. Meta-Optimizer (synthesises golden rules from lessons) ──
-        if self.meta_optimizer:
+        if self.meta_optimizer and config.ENABLE_META_OPTIMIZER:
             try:
                 self.meta_optimizer.optimize()
             except Exception as e:
                 logger.error(f"Meta-Optimizer error: {e}")
 
         # ── 2. Full Session Post-Mortem (deep LLM analysis + auto config tuning) ──
-        try:
-            logger.info("🔬 Running session post-mortem analysis...")
-            update_intent("🔬 Session post-mortem: Claude reviewing all trades and missed opportunities...", [])
-            from session_review import run_review
-            run_review()
-        except Exception as e:
-            logger.error(f"Session post-mortem error: {e}")
+        if config.ENABLE_END_OF_SESSION_REVIEW:
+            try:
+                logger.info("🔬 Running session post-mortem analysis...")
+                update_intent("🔬 Session post-mortem: Claude reviewing all trades and missed opportunities...", [])
+                from session_review import run_review
+                run_review()
+            except Exception as e:
+                logger.error(f"Session post-mortem error: {e}")
         
         update_intent(f"Done. {self.trades_closed} trades. PnL: ${self.total_session_pnl:,.2f}. Run 'python3 reset_session.py' to start fresh.", [])
         sys.exit(0)
