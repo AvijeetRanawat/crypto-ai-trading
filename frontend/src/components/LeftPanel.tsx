@@ -224,8 +224,12 @@ export function LeftPanel({
       .filter((point) => point.time > 0)
       .sort((a, b) => a.time - b.time);
 
-    buySeriesRef.current.setData(history.map((point) => ({ time: point.time, value: point.buy })));
-    sellSeriesRef.current.setData(history.map((point) => ({ time: point.time, value: -point.sell })));
+    const signalByTime = new Map<number, { time: UTCTimestamp; buy: number; sell: number }>();
+    history.forEach((point) => signalByTime.set(Number(point.time), point));
+    const uniqueHistory = Array.from(signalByTime.values());
+
+    buySeriesRef.current.setData(uniqueHistory.map((point) => ({ time: point.time, value: point.buy })));
+    sellSeriesRef.current.setData(uniqueHistory.map((point) => ({ time: point.time, value: -point.sell })));
 
     const traded = signals.filter((signal) => signal.outcome === "TRADED");
     const missed = signals.filter((signal) => signal.outcome === "MISSED");
