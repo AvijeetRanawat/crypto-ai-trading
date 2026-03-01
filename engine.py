@@ -209,6 +209,70 @@ class TradingEngine:
 
         return buy_count, sell_count
 
+    def _weighted_vote_counts(self, rsi_result, macd_result, bb_result, sr_result, candle_result,
+                              stochrsi_result=None, ema_result=None, volmom_result=None,
+                              vote_weights: dict | None = None) -> tuple:
+        weights = {
+            "rsi": 1.0,
+            "macd": 1.0,
+            "bb": 1.0,
+            "sr": 1.0,
+            "candle": 1.0,
+            "stochrsi": 1.0,
+            "ema": 1.0,
+            "volmom": 1.0,
+        }
+        for key, val in (vote_weights or {}).items():
+            if key in weights:
+                weights[key] = max(0.2, float(val))
+
+        buy_score = 0.0
+        sell_score = 0.0
+        raw_buy = 0
+        raw_sell = 0
+
+        buy_signals = {"STRONG_BUY", "BUY", "BULLISH_CROSS", "BULLISH_ENGULFING", "HAMMER"}
+        sell_signals = {"STRONG_SELL", "SELL", "BEARISH_CROSS", "BEARISH_ENGULFING", "SHOOTING_STAR"}
+
+        def _apply(signal, key):
+            nonlocal buy_score, sell_score, raw_buy, raw_sell
+            if signal in buy_signals:
+                buy_score += weights[key]
+                raw_buy += 1
+            elif signal in sell_signals:
+                sell_score += weights[key]
+                raw_sell += 1
+
+        _apply(rsi_result.get("signal"), "rsi")
+        _apply(macd_result.get("crossover"), "macd")
+        _apply(bb_result.get("signal"), "bb")
+
+        sr_sig = sr_result.get("signal")
+        if sr_sig in ("BUY", "WATCH_BUY"):
+            buy_score += weights["sr"]
+            raw_buy += 1
+        elif sr_sig in ("SELL", "WATCH_SELL"):
+            sell_score += weights["sr"]
+            raw_sell += 1
+
+        candle_sig = candle_result.get("signal")
+        if candle_sig == "BUY":
+            buy_score += weights["candle"]
+            raw_buy += 1
+        elif candle_sig == "SELL":
+            sell_score += weights["candle"]
+            raw_sell += 1
+
+        if stochrsi_result:
+            _apply(stochrsi_result.get("signal"), "stochrsi")
+        if ema_result:
+            _apply(ema_result.get("signal"), "ema")
+        if volmom_result:
+            _apply(volmom_result.get("signal"), "volmom")
+
+        total_weight = sum(weights.values())
+        return buy_score, sell_score, raw_buy, raw_sell, total_weight
+
     def _safe_tool_call(self, name: str, fn, fallback):
         try:
             out = fn()
@@ -270,10 +334,11 @@ class TradingEngine:
         sentiment_snapshot: dict = None,
         buy_count: int = 0,
         sell_count: int = 0,
+        total_vote_weight: float = 8.0,
     ):
         if not bool(config.ENABLE_RL_WEIGHT_AGENT):
             return
-        vote_imbalance = min(1.0, abs(int(buy_count or 0) - int(sell_count or 0)) / 8.0)
+        vote_imbalance = min(1.0, abs(float(buy_count or 0) - float(sell_count or 0)) / max(total_vote_weight, 1.0))
         rl_inf = self._rl_infer(
             mode=str(mode or config.TRADING_PRODUCT).upper(),
             regime=str((regime_result or {}).get("regime", "UNKNOWN")).upper(),
@@ -365,20 +430,21 @@ class TradingEngine:
 
         return True, ""
 
-    def _estimate_expected_edge_pct(self, buy_count: int, sell_count: int, tp_pct: float, sl_pct: float) -> float:
+    def _estimate_expected_edge_pct(self, buy_count: float, sell_count: float, tp_pct: float, sl_pct: float, total_weight: float = 8.0) -> float:
         agreement = max(buy_count, sell_count)
         disagreement = min(buy_count, sell_count)
-        quality = max(0.0, (agreement - disagreement) / 8.0)
+        quality = max(0.0, (agreement - disagreement) / max(total_weight, 1.0))
         expected_move_pct = (tp_pct * 100) * max(0.5, quality + 0.3)
         risk_drag_pct = (sl_pct * 100) * (1.0 - quality)
         return expected_move_pct - risk_drag_pct - config.FEE_SLIPPAGE_BUFFER_PCT
 
-    def _deterministic_decision(self, buy_count: int, sell_count: int) -> tuple:
+    def _deterministic_decision(self, buy_count: float, sell_count: float, total_weight: float = 8.0) -> tuple:
         agreement = max(buy_count, sell_count)
         disagreement = min(buy_count, sell_count)
         margin = agreement - disagreement
 
-        if agreement < 3:
+        scaled_min = max(2.0, 3.0 * (total_weight / 8.0))
+        if agreement < scaled_min:
             return "NEUTRAL", 0.0, "insufficient deterministic agreement"
 
         if buy_count > sell_count:
@@ -389,12 +455,12 @@ class TradingEngine:
             return "NEUTRAL", 0.0, "conflicting deterministic votes"
 
         # Strong confluence bypasses LLM completely.
-        if agreement >= 5 and margin >= 2:
-            conf = min(0.92, 0.60 + (agreement * 0.05) + (margin * 0.03))
+        if agreement >= (5.0 * (total_weight / 8.0)) and margin >= (2.0 * (total_weight / 8.0)):
+            conf = min(0.92, 0.60 + (agreement / max(total_weight, 1.0)) * 0.40 + (margin / max(total_weight, 1.0)) * 0.20)
             return action, conf, "deterministic strong confluence"
 
         # Borderline setup: LLM tie-breaker allowed.
-        conf = min(0.82, 0.50 + (agreement * 0.04) + (margin * 0.02))
+        conf = min(0.82, 0.50 + (agreement / max(total_weight, 1.0)) * 0.30 + (margin / max(total_weight, 1.0)) * 0.15)
         return action, conf, "deterministic borderline setup"
 
     def _futures_policy_decision(
@@ -403,6 +469,7 @@ class TradingEngine:
         proposed_dir: str,
         buy_count: int,
         sell_count: int,
+        total_vote_weight: float,
         confidence: float,
         expected_edge_pct: float,
         regime_result: dict,
@@ -498,7 +565,7 @@ class TradingEngine:
                 "hard_reject_reason": "low_liquidity",
             }
 
-        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / max(total_vote_weight, 1.0))
         regime_score = self._clamp(regime_strength / max(config.FUTURES_MIN_REGIME_STRENGTH * 2.2, 0.30))
 
         vel_1m = float(vel_result.get("velocity_1m", 0.0) or 0.0)
@@ -682,6 +749,7 @@ class TradingEngine:
         proposed_dir: str,
         buy_count: int,
         sell_count: int,
+        total_vote_weight: float,
         confidence: float,
         expected_edge_pct: float,
         regime_result: dict,
@@ -718,7 +786,7 @@ class TradingEngine:
         spread_pct = float(vol_prof.get("spread_pct", 0.0) or 0.0)
         volume_24h = float(vol_prof.get("volume_24h", 0.0) or 0.0)
         session_quality = str(session_filt.get("quality", "LOW")).upper()
-        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / max(total_vote_weight, 1.0))
 
         if spread_pct > config.OPTIONS_MAX_SPREAD_PCT:
             return {
@@ -971,6 +1039,7 @@ class TradingEngine:
         proposed_dir: str,
         buy_count: int,
         sell_count: int,
+        total_vote_weight: float,
         confidence: float,
         expected_edge_pct: float,
         regime_result: dict,
@@ -1019,7 +1088,7 @@ class TradingEngine:
         spread_pct = float(vol_prof.get("spread_pct", 0.0) or 0.0)
         volume_24h = float(vol_prof.get("volume_24h", 0.0) or 0.0)
         session_quality = str(session_filt.get("quality", "LOW")).upper()
-        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / max(total_vote_weight, 1.0))
 
         if spread_pct > config.SPOT_MAX_SPREAD_PCT:
             return {
@@ -1278,13 +1347,13 @@ class TradingEngine:
             "hard_reject_reason": "",
         }
 
-    def _product_policy_decision(self, mode: str = None, **kwargs) -> dict:
+    def _product_policy_decision(self, mode: str = None, total_vote_weight: float = 8.0, **kwargs) -> dict:
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
         if active_mode == "FUTURES":
-            return self._futures_policy_decision(mode=active_mode, **kwargs)
+            return self._futures_policy_decision(mode=active_mode, total_vote_weight=total_vote_weight, **kwargs)
         if active_mode == "OPTIONS":
-            return self._options_policy_decision(mode=active_mode, **kwargs)
-        return self._spot_policy_decision(mode=active_mode, **kwargs)
+            return self._options_policy_decision(mode=active_mode, total_vote_weight=total_vote_weight, **kwargs)
+        return self._spot_policy_decision(mode=active_mode, total_vote_weight=total_vote_weight, **kwargs)
 
     def _log_futures_eval(self, symbol: str, stage: str, eval_result: dict, mode: str = None):
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
@@ -1863,42 +1932,81 @@ class TradingEngine:
                             {"signal": "NEUTRAL", "verdict": "Tool error"},
                         )
 
-                        buy_count, sell_count = self._count_pro_signals(
+                        raw_buy_count, raw_sell_count = self._count_pro_signals(
                             rsi_result, macd_result, bb_result, sr_result, candle_result,
                             stochrsi_result, ema_result, volmom_result
                         )
 
+                        regime_result = self._safe_tool_call(
+                            "MarketRegimeDetector",
+                            lambda: MarketRegimeDetector.analyze(history),
+                            {"regime": "UNKNOWN", "trade_direction": "ANY", "strength": 0.0, "verdict": "Tool error"},
+                        )
+                        regime = regime_result["regime"]
+                        allowed_dir = regime_result["trade_direction"]
+
+                        vote_imbalance_raw = abs(raw_buy_count - raw_sell_count) / 8.0
+                        rl_vote_inf = self._rl_infer(
+                            mode=active_mode,
+                            regime=str(regime_result.get("regime", "UNKNOWN")).upper(),
+                            session_quality=str(session_filt.get("quality", "LOW")).upper(),
+                            volatility_pct=float(vol_result.get("volatility_pct", 0.0) or 0.0),
+                            sentiment_score=0.0,
+                            vote_imbalance=vote_imbalance_raw,
+                            expected_edge_pct=0.0,
+                        )
+                        buy_count, sell_count, raw_buy_count, raw_sell_count, total_vote_weight = self._weighted_vote_counts(
+                            rsi_result, macd_result, bb_result, sr_result, candle_result,
+                            stochrsi_result, ema_result, volmom_result,
+                            vote_weights=rl_vote_inf.get("voter_weight_mult", {}),
+                        )
+                        min_pro_needed_weighted = min_pro_needed * (total_vote_weight / 8.0)
+
                         # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
-                        if buy_count < min_pro_needed and sell_count < min_pro_needed:
+                        if buy_count < min_pro_needed_weighted and sell_count < min_pro_needed_weighted:
                             self.skipped_cycles_by_mode[active_mode] += 1
                             best = max(buy_count, sell_count)
                             if self.skipped_cycles_by_mode[active_mode] % 6 == 1:
                                 intent(
-                                    f"⏳ Waiting for setup ({best}/{min_pro_needed} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
+                                    f"⏳ Waiting for setup ({best:.1f}/{min_pro_needed_weighted:.1f} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
                                     [symbol]
                                 )
                             if self.skipped_cycles_by_mode[active_mode] % 3 == 0:
-                                save_signal_event(symbol, current_price, buy_count, sell_count,
-                                                  rsi_result['rsi'], macd_result['crossover'],
-                                                  bb_result['position_pct'], 'SKIPPED',
-                                                  decision_source=self._mode_decision_source(active_mode, "SETUP_WAIT"))
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "SETUP_WAIT"),
+                                )
                             continue
 
                         # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
                         # Quality enforced by confidence floor (0.70) + duplicate blocker (120s)
-                        if sell_count >= 2 and sell_count > buy_count:
+                        dir_threshold = 2.0 * (total_vote_weight / 8.0)
+                        if sell_count >= dir_threshold and sell_count > buy_count:
                             proposed_dir = "SHORT"
-                        elif buy_count >= 2 and buy_count >= sell_count:
+                        elif buy_count >= dir_threshold and buy_count >= sell_count:
                             proposed_dir = "LONG"
                         else:
                             self.skipped_cycles_by_mode[active_mode] += 1
                             directional_action = "LONG" if buy_count > sell_count else ("SHORT" if sell_count > buy_count else "NEUTRAL")
-                            directional_conf = max(buy_count, sell_count) / 8.0
+                            directional_conf = max(buy_count, sell_count) / max(total_vote_weight, 1.0)
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -1909,15 +2017,18 @@ class TradingEngine:
                             )
                             continue  # Not enough signals for either direction
 
-                        det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count)
+                        det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count, total_vote_weight)
                         deterministic_dir = "LONG" if det_action == "BUY" else ("SHORT" if det_action == "SELL" else "NEUTRAL")
                         if det_action == "NEUTRAL":
                             self.skipped_cycles_by_mode[active_mode] += 1
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -1929,22 +2040,16 @@ class TradingEngine:
                             continue
 
                         # ── v6: MARKET REGIME FILTER ───────────────────────
-                        regime_result = self._safe_tool_call(
-                            "MarketRegimeDetector",
-                            lambda: MarketRegimeDetector.analyze(history),
-                            {"regime": "UNKNOWN", "trade_direction": "ANY", "strength": 0.0, "verdict": "Tool error"},
-                        )
-                        regime = regime_result["regime"]
-                        allowed_dir   = regime_result["trade_direction"]
                         baseline_edge_pct = self._estimate_expected_edge_pct(
                             buy_count,
                             sell_count,
                             config.TAKE_PROFIT_PCT,
                             config.EARLY_STOP_LOSS_PCT,
+                            total_vote_weight,
                         )
 
                         if regime == "CHOPPY":
-                            vote_imbalance = abs(buy_count - sell_count) / 8.0
+                            vote_imbalance = abs(buy_count - sell_count) / max(total_vote_weight, 1.0)
                             if (
                                 not config.ALLOW_CHOPPY_HIGH_CONVICTION
                                 or vote_imbalance < config.CHOPPY_MIN_VOTE_IMBALANCE
@@ -1960,8 +2065,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -1981,6 +2089,7 @@ class TradingEngine:
                                     sentiment_snapshot=None,
                                     buy_count=buy_count,
                                     sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
                                 )
                                 continue
                             intent(
@@ -1998,8 +2107,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2019,6 +2131,7 @@ class TradingEngine:
                                 sentiment_snapshot=None,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
@@ -2044,8 +2157,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2065,6 +2181,7 @@ class TradingEngine:
                                 sentiment_snapshot=sentiment_snapshot,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
@@ -2090,8 +2207,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2111,6 +2231,7 @@ class TradingEngine:
                                 sentiment_snapshot=sentiment_snapshot,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
@@ -2126,8 +2247,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2147,6 +2271,7 @@ class TradingEngine:
                                 sentiment_snapshot=sentiment_snapshot,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
@@ -2160,8 +2285,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2181,6 +2309,7 @@ class TradingEngine:
                                 sentiment_snapshot=sentiment_snapshot,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
@@ -2196,8 +2325,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2217,6 +2349,7 @@ class TradingEngine:
                                     sentiment_snapshot=sentiment_snapshot,
                                     buy_count=buy_count,
                                     sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
                                 )
                                 continue
                             if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 1200:
@@ -2225,8 +2358,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2246,6 +2382,7 @@ class TradingEngine:
                                     sentiment_snapshot=sentiment_snapshot,
                                     buy_count=buy_count,
                                     sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
                                 )
                                 continue
 
@@ -2313,14 +2450,23 @@ class TradingEngine:
                             }
                         )
 
-                        expected_edge_pct = self._estimate_expected_edge_pct(buy_count, sell_count, dynamic_tp, dynamic_sl)
+                        expected_edge_pct = self._estimate_expected_edge_pct(
+                            buy_count,
+                            sell_count,
+                            dynamic_tp,
+                            dynamic_sl,
+                            total_vote_weight,
+                        )
                         if expected_edge_pct < config.MIN_EXPECTED_EDGE_PCT:
                             self.skipped_cycles_by_mode[active_mode] += 1
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2340,11 +2486,13 @@ class TradingEngine:
                                 sentiment_snapshot=sentiment_snapshot,
                                 buy_count=buy_count,
                                 sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
                             )
                             continue
 
                         pre_policy = self._product_policy_decision(
                             mode=active_mode,
+                            total_vote_weight=total_vote_weight,
                             symbol=symbol,
                             stage="pre-llm",
                             proposed_dir=proposed_dir,
@@ -2378,8 +2526,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2398,7 +2549,7 @@ class TradingEngine:
                         final_conf = det_conf
                         final_reason = f"Deterministic: {det_reason}"
 
-                        borderline_setup = det_conf < 0.75 or max(buy_count, sell_count) <= 4
+                        borderline_setup = det_conf < 0.75 or max(buy_count, sell_count) <= (4.0 * (total_vote_weight / 8.0))
                         if borderline_setup:
                             llm_ok, llm_reason = self._llm_budget_ok()
                             if not llm_ok:
@@ -2407,8 +2558,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2424,14 +2578,17 @@ class TradingEngine:
                                 wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
                                 if self.skipped_cycles_by_mode[active_mode] % 2 == 0:
                                     intent(
-                                        f"⚡ Borderline setup {proposed_dir} ({buy_count}B/{sell_count}S) | LLM in {wait_left}s...",
+                                        f"⚡ Borderline setup {proposed_dir} ({buy_count:.1f}B/{sell_count:.1f}S) | LLM in {wait_left}s...",
                                         [symbol],
                                     )
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2447,8 +2604,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2492,8 +2652,11 @@ class TradingEngine:
                                 save_signal_event(
                                     symbol,
                                     current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
                                     buy_count,
                                     sell_count,
+                                    total_vote_weight,
                                     rsi_result["rsi"],
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
@@ -2528,6 +2691,7 @@ class TradingEngine:
                         final_dir = "LONG" if final_action == "BUY" else "SHORT"
                         post_policy = self._product_policy_decision(
                             mode=active_mode,
+                            total_vote_weight=total_vote_weight,
                             symbol=symbol,
                             stage="post-llm",
                             proposed_dir=final_dir,
@@ -2560,8 +2724,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2574,6 +2741,64 @@ class TradingEngine:
                             )
                             continue
                         selected_mode, policy_eval = active_mode, post_policy
+
+                        # ── LLM decision review (support vs oppose) ─────────
+                        if (
+                            config.ENABLE_LLM_DECISION_REVIEW
+                            and self.llm_agent
+                            and self.llm_agent.ready
+                            and final_conf >= float(config.LLM_REVIEW_MIN_CONFIDENCE)
+                        ):
+                            review, review_usage = self.llm_agent.review_decision(
+                                symbol=symbol,
+                                current_price=current_price,
+                                action=final_action,
+                                confidence=final_conf,
+                                reason=final_reason,
+                                regime=regime,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                                raw_buy=raw_buy_count,
+                                raw_sell=raw_sell_count,
+                                total_vote_weight=total_vote_weight,
+                                tool_outputs=tool_outputs,
+                                policy_verdict=str(post_policy.get("verdict", "")),
+                            )
+                            if review_usage:
+                                self._register_llm_usage(symbol, review_usage, context=f"review|{final_action}|{regime}")
+                            if review:
+                                verdict = str(review.get("verdict", "NEUTRAL")).upper()
+                                suggested = str(review.get("suggested_action", "SKIP")).upper()
+                                review_conf = float(review.get("confidence", 0.0) or 0.0)
+                                if verdict == "OPPOSE" and review_conf >= 0.50:
+                                    self.skipped_cycles_by_mode[active_mode] += 1
+                                    intent(
+                                        f"🧠 LLM REVIEW OPPOSED: {review.get('reason', '')}",
+                                        [symbol],
+                                    )
+                                    save_signal_event(
+                                        symbol,
+                                        current_price,
+                                        raw_buy_count,
+                                        raw_sell_count,
+                                        buy_count,
+                                        sell_count,
+                                        total_vote_weight,
+                                        rsi_result["rsi"],
+                                        macd_result["crossover"],
+                                        bb_result["position_pct"],
+                                        "SKIPPED",
+                                        decision_source=self._mode_decision_source(active_mode, "LLM_REVIEW_OPPOSE"),
+                                        deterministic_action=deterministic_dir,
+                                        deterministic_conf=det_conf,
+                                        llm_cost_usd=llm_cost,
+                                        llm_tokens=llm_tokens,
+                                    )
+                                    continue
+                                if verdict == "OPPOSE" and suggested in {"BUY", "SELL"}:
+                                    final_action = suggested
+                                    final_dir = "LONG" if final_action == "BUY" else "SHORT"
+                                    final_reason = f"LLM review override: {review.get('reason', '')}"
 
                         # ── Position sizing (risk-capped) ──────────────────
                         base_conf = final_conf
@@ -2606,8 +2831,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2626,8 +2854,11 @@ class TradingEngine:
                             save_signal_event(
                                 symbol,
                                 current_price,
+                                raw_buy_count,
+                                raw_sell_count,
                                 buy_count,
                                 sell_count,
+                                total_vote_weight,
                                 rsi_result["rsi"],
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
@@ -2712,8 +2943,11 @@ class TradingEngine:
                         save_signal_event(
                             symbol,
                             current_price,
+                            raw_buy_count,
+                            raw_sell_count,
                             buy_count,
                             sell_count,
+                            total_vote_weight,
                             rsi_result["rsi"],
                             macd_result["crossover"],
                             bb_result["position_pct"],

@@ -262,6 +262,87 @@ class LLMAgent(BaseStrategy):
         }
         return text, usage_event
 
+    def review_decision(
+        self,
+        symbol: str,
+        current_price: float,
+        action: str,
+        confidence: float,
+        reason: str,
+        regime: str,
+        buy_count: float,
+        sell_count: float,
+        raw_buy: int,
+        raw_sell: int,
+        total_vote_weight: float,
+        tool_outputs: list,
+        policy_verdict: str,
+    ) -> tuple:
+        usage_events = []
+        if not self.ready:
+            return None, usage_events
+
+        tool_block = "\n".join([f"  - {t['name']}: {t['data']}" for t in tool_outputs])
+        prompt = f"""You are a risk-aware trading critic. Review the proposed decision and decide whether to SUPPORT it or OPPOSE it.
+
+<DECISION>
+Symbol: {symbol}
+Price: ${current_price:,.2f}
+Decision: {action}
+Confidence: {confidence:.2f}
+Reason: {reason}
+Regime: {regime}
+</DECISION>
+
+<WEIGHTED_VOTES>
+Weighted BUY: {buy_count:.2f}
+Weighted SELL: {sell_count:.2f}
+Raw BUY: {raw_buy}
+Raw SELL: {raw_sell}
+Total Weight: {total_vote_weight:.2f}
+</WEIGHTED_VOTES>
+
+<POLICY_VERDICT>
+{policy_verdict}
+</POLICY_VERDICT>
+
+<TOOLS>
+{tool_block}
+</TOOLS>
+
+Output strictly valid JSON (no markdown):
+{{
+  "verdict": "SUPPORT" | "OPPOSE" | "NEUTRAL",
+  "confidence": 0.00,
+  "reason": "short rationale",
+  "suggested_action": "BUY" | "SELL" | "SKIP"
+}}"""
+
+        try:
+            model_id = config.OPENAI_MODEL_ID if self.provider == "OPENAI" else config.BEDROCK_MODEL_ID
+            llm_text, usage_event = self._invoke_with_usage(
+                model_id=model_id,
+                stage="decision_review",
+                prompt=prompt,
+                max_tokens=180,
+                temperature=0.1,
+            )
+            usage_events.append(usage_event)
+            result = json.loads(_strip_fences(llm_text))
+            verdict = str(result.get("verdict", "NEUTRAL")).upper()
+            confidence = float(result.get("confidence", 0.0) or 0.0)
+            rationale = str(result.get("reason", ""))
+            suggested = str(result.get("suggested_action", "SKIP")).upper()
+            return {
+                "verdict": verdict,
+                "confidence": confidence,
+                "reason": rationale,
+                "suggested_action": suggested,
+            }, usage_events
+        except Exception as e:
+            logger.warning(f"LLM decision review failed: {e}")
+            return None, usage_events
+
     def _haiku_gate(
         self,
         buy_votes: int,

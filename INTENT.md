@@ -63,6 +63,7 @@ Mode-specific decisions are tagged with `SPOT_`, `FUTURES_`, or `OPTIONS_` prefi
 ## 4) LLM Layer
 
 - LLM is used mostly for borderline setups (tie-breaker role).
+- Optional LLM decision review can SUPPORT/OPPOSE a final action and suggest overrides.
 - Provider support:
   - Bedrock
   - OpenAI
@@ -88,16 +89,17 @@ For each eligible symbol:
 
 1. Collect tool outputs:
    - volatility, liquidity, RSI, MACD, BB, EMA cross, StochRSI, volume momentum, order book pressure, etc.
-2. Build deterministic vote counts (buy vs sell).
+2. Build deterministic vote counts (buy vs sell), plus weighted vote totals.
 3. Apply market regime + session filters.
 4. Apply sentiment gate.
 5. Estimate expected edge.
 6. Evaluate SPOT/FUTURES/OPTIONS policies in parallel (pre-LLM).
 7. If borderline and permitted, call LLM tie-breaker.
 8. Re-evaluate policies (post-LLM) with final direction/confidence.
-9. Choose best allowed mode by composite score **within the active mode**.
-10. Size position (risk-capped by balance + config limits).
-11. Execute paper trade and persist full decision metadata.
+9. Optionally run an LLM decision review (support vs oppose) and override/skip if needed.
+10. Choose best allowed mode by composite score **within the active mode**.
+11. Size position (risk-capped by balance + config limits).
+12. Execute paper trade and persist full decision metadata.
 
 If rejected, decision is persisted as `SKIPPED`/`MISSED` with reason context.
 
@@ -215,6 +217,7 @@ The RL layer makes the system less static by learning which weight profile works
   - confidence bias
   - size multiplier
   - leverage multiplier (futures)
+  - voter weight multipliers (applied to the 8 deterministic vote parameters)
 - Reward:
   - realized trade PnL normalized by notional (profit positive, loss negative)
   - minus open-trade opportunity cost penalty
@@ -258,6 +261,7 @@ The app logs high-volume event traces by design:
 - LLM/Bedrock request-response logs
 - policy evaluation diagnostics by mode
 - entry/exit reasons with confidence and score traces
+- signal events capture raw votes plus weighted buy/sell/total
 - RL updates (`RL_UPDATE`, reward, Q-value drift, epsilon)
 
 Dashboard sections expose:
@@ -265,6 +269,7 @@ Dashboard sections expose:
 - market regime
 - intent
 - vote and TA status
+- weighted vote confidence (BUY/SELL %)
 - strategy diagnostics (mode-specific)
 - sentiment/news summary
 - LLM token/cost usage (aggregate + model breakdown)

@@ -47,6 +47,9 @@ export interface SignalEvent {
   price: number;
   buy_votes: number;
   sell_votes: number;
+  weighted_buy?: number;
+  weighted_sell?: number;
+  total_weight?: number;
   rsi: number;
   macd: string;
   bb_pct: number;
@@ -170,6 +173,9 @@ export interface StrategyDecision {
   confidence: number;
   buy_votes: number;
   sell_votes: number;
+  weighted_buy?: number;
+  weighted_sell?: number;
+  total_weight?: number;
 }
 
 export interface StrategyDiagnostics {

@@ -12,7 +12,6 @@ import type {
   StrategyDiagnostics,
 } from "../types/dashboard";
 import { formatNum } from "../utils/format";
-import { TOTAL_VOTES } from "../utils/constants";
 
 interface RightPanelProps {
   panelWidth: number;
@@ -67,6 +66,21 @@ export function RightPanel({
   const [sentimentExpanded, setSentimentExpanded] = useState(false);
   const buyVotes = latestSignal?.buy_votes ?? 0;
   const sellVotes = latestSignal?.sell_votes ?? 0;
+  const weightedBuy = latestSignal?.weighted_buy ?? buyVotes;
+  const weightedSell = latestSignal?.weighted_sell ?? sellVotes;
+  const totalWeight = latestSignal?.total_weight ?? weightedBuy + weightedSell;
+  const totalVotes = Math.max(1, totalWeight);
+  const buyPct = Math.min(100, (weightedBuy / totalVotes) * 100);
+  const sellPct = Math.min(100, (weightedSell / totalVotes) * 100);
+  const latestDecision =
+    strategyDiagnostics.recent_decisions[strategyDiagnostics.recent_decisions.length - 1];
+  const weightedDecision: "BUY" | "SELL" | "SKIP" = latestDecision
+    ? latestDecision.outcome === "TRADED"
+      ? latestDecision.action === "SELL" || latestDecision.action === "SHORT"
+        ? "SELL"
+        : "BUY"
+      : "SKIP"
+    : "SKIP";
 
   return (
     <aside className="ai-panel" style={{ width: `${panelWidth}px` }}>
@@ -105,20 +119,20 @@ export function RightPanel({
             <div className="vote-bar-wrap">
               <div
                 className="vote-bar buy-bar"
-                style={{ width: `${Math.min(100, (buyVotes / TOTAL_VOTES) * 100)}%` }}
+                style={{ width: `${buyPct}%` }}
               />
             </div>
-            <span className="vote-count positive">{buyVotes}/{TOTAL_VOTES}</span>
+            <span className="vote-count positive">{buyPct.toFixed(0)}%</span>
           </div>
           <div className="vote-row">
             <span className="vote-label">SELL</span>
             <div className="vote-bar-wrap">
               <div
                 className="vote-bar sell-bar"
-                style={{ width: `${Math.min(100, (sellVotes / TOTAL_VOTES) * 100)}%` }}
+                style={{ width: `${sellPct}%` }}
               />
             </div>
-            <span className="vote-count negative">{sellVotes}/{TOTAL_VOTES}</span>
+            <span className="vote-count negative">{sellPct.toFixed(0)}%</span>
           </div>
         </div>
         <div className="ta-grid">
@@ -176,10 +190,24 @@ export function RightPanel({
             <div className="empty-state">No {strategyDiagnostics.mode} decisions yet for {strategyDiagnostics.symbol}</div>
           )}
           {strategyDiagnostics.recent_decisions.map((decision) => (
-            <div className="strategy-recent-item" key={`${decision.timestamp}-${decision.decision_source}-${decision.outcome}`}>
-              <span className="mono strategy-recent-head">
-                {decision.action} · {decision.confidence.toFixed(2)} · {decision.buy_votes}B/{decision.sell_votes}S
-              </span>
+            <div
+              className="strategy-recent-item"
+              key={`${decision.timestamp}-${decision.decision_source}-${decision.outcome}`}
+            >
+              {(() => {
+                const weightedDecisionBuy = decision.weighted_buy ?? decision.buy_votes;
+                const weightedDecisionSell = decision.weighted_sell ?? decision.sell_votes;
+                const weightedDecisionTotal =
+                  decision.total_weight ?? weightedDecisionBuy + weightedDecisionSell;
+                const denom = Math.max(1, weightedDecisionTotal);
+                const buyPercent = Math.min(100, (weightedDecisionBuy / denom) * 100);
+                const sellPercent = Math.min(100, (weightedDecisionSell / denom) * 100);
+                return (
+            <span className="mono strategy-recent-head">
+                    {decision.action} · {decision.confidence.toFixed(2)} · {buyPercent.toFixed(0)}% / {sellPercent.toFixed(0)}%
+            </span>
+                );
+              })()}
               <span className="strategy-recent-sub">
                 {decision.outcome} · {decision.decision_source}
               </span>
@@ -287,6 +315,7 @@ export function RightPanel({
       <MarketSentimentModal
         open={sentimentExpanded}
         sentiment={newsSentiment}
+        decision={weightedDecision}
         onClose={() => setSentimentExpanded(false)}
       />
 

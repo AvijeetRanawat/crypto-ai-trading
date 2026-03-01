@@ -47,6 +47,21 @@ describe("dashboardApi", () => {
     expect(firstArg).toContain("mode=FUTURES");
   });
 
+  it("builds intent path without mode query when mode is omitted", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dashboardApi.intent();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const firstArg = fetchMock.mock.calls[0][0] as string;
+    expect(firstArg).toContain("/api/intent");
+    expect(firstArg).not.toContain("?mode=");
+  });
+
   it("exercises all endpoint helpers", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

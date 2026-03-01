@@ -3,6 +3,7 @@ import type { NewsSentiment } from "../types/dashboard";
 interface MarketSentimentModalProps {
   open: boolean;
   sentiment: NewsSentiment;
+  decision: "BUY" | "SELL" | "SKIP";
   onClose: () => void;
 }
 
@@ -18,7 +19,13 @@ function articleSentimentLabel(score: number): "BULLISH" | "BEARISH" | "NEUTRAL"
   return "NEUTRAL";
 }
 
-export function MarketSentimentModal({ open, sentiment, onClose }: MarketSentimentModalProps) {
+function decisionClassName(decision: "BUY" | "SELL" | "SKIP"): string {
+  if (decision === "BUY") return "sentiment-bull";
+  if (decision === "SELL") return "sentiment-bear";
+  return "sentiment-neutral";
+}
+
+export function MarketSentimentModal({ open, sentiment, decision, onClose }: MarketSentimentModalProps) {
   if (!open) return null;
 
   const sources = sentiment.components.sources_available || {};
@@ -34,6 +41,10 @@ export function MarketSentimentModal({ open, sentiment, onClose }: MarketSentime
         </div>
 
         <div className="sentiment-modal-stats">
+          <div className="sentiment-modal-stat">
+            <span className="sentiment-modal-key">Weighted Decision</span>
+            <span className={`sentiment-badge ${decisionClassName(decision)}`}>{decision}</span>
+          </div>
           <div className="sentiment-modal-stat">
             <span className="sentiment-modal-key">Symbol</span>
             <span className="mono">{sentiment.symbol || "-"}</span>

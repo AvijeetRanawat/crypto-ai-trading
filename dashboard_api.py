@@ -375,23 +375,56 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
     """Signal events — session only."""
     conn = _db()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT timestamp, price, buy_votes, sell_votes, rsi, macd, bb_pct, outcome, claude_action, claude_conf
+    signal_cols = _table_columns(cur, "signal_events")
+    has_weighted = {"weighted_buy", "weighted_sell", "total_weight"}.issubset(set(signal_cols))
+    select_fields = [
+        "timestamp",
+        "price",
+        "buy_votes",
+        "sell_votes",
+    ]
+    if has_weighted:
+        select_fields += ["weighted_buy", "weighted_sell", "total_weight"]
+    select_fields += ["rsi", "macd", "bb_pct", "outcome", "claude_action", "claude_conf"]
+
+    cur.execute(
+        f"""
+        SELECT {", ".join(select_fields)}
         FROM signal_events
         WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
         ORDER BY id DESC LIMIT ?
-    """, (symbol, SESSION_START, SESSION_ID, limit))
+        """,
+        (symbol, SESSION_START, SESSION_ID, limit),
+    )
     rows = cur.fetchall()
     conn.close()
-    return [
-        {
-            "timestamp": r[0], "price": r[1],
-            "buy_votes": r[2], "sell_votes": r[3],
-            "rsi": r[4], "macd": r[5], "bb_pct": r[6],
-            "outcome": r[7], "claude_action": r[8], "claude_conf": r[9],
+    results = []
+    for row in reversed(rows):
+        idx = 0
+        entry = {
+            "timestamp": row[idx],
+            "price": row[idx + 1],
+            "buy_votes": row[idx + 2],
+            "sell_votes": row[idx + 3],
         }
-        for r in reversed(rows)
-    ]
+        idx += 4
+        if has_weighted:
+            entry["weighted_buy"] = row[idx]
+            entry["weighted_sell"] = row[idx + 1]
+            entry["total_weight"] = row[idx + 2]
+            idx += 3
+        entry.update(
+            {
+                "rsi": row[idx],
+                "macd": row[idx + 1],
+                "bb_pct": row[idx + 2],
+                "outcome": row[idx + 3],
+                "claude_action": row[idx + 4],
+                "claude_conf": row[idx + 5],
+            }
+        )
+        results.append(entry)
+    return results
 
 
 @app.get("/api/strategy/diagnostics")
@@ -464,6 +497,11 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
     total_pnl = float((trade_stats[3] or 0.0) if trade_stats else 0.0)
     win_rate = (wins / closed_trades * 100.0) if closed_trades else 0.0
 
+    has_weighted = {"weighted_buy", "weighted_sell", "total_weight"}.issubset(set(signal_cols))
+    weighted_select = ""
+    if has_weighted:
+        weighted_select = ", weighted_buy, weighted_sell, total_weight"
+
     cur.execute(
         f"""
         SELECT
@@ -474,6 +512,7 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
             {confidence_expr} AS confidence,
             buy_votes,
             sell_votes
+            {weighted_select}
         FROM signal_events
         WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
         AND ({mode_and_global_filter})
@@ -505,18 +544,22 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
             return "Volatility + structure fit to choose spread/volatility strategies, otherwise skip."
         return "Long-biased spot entries focused on trend quality and selective pullback/breakout setups."
 
-    recent_decisions = [
-        {
-            "timestamp": r[0],
-            "outcome": r[1],
-            "decision_source": r[2],
-            "action": r[3] or "-",
-            "confidence": float(r[4] or 0.0),
-            "buy_votes": int(r[5] or 0),
-            "sell_votes": int(r[6] or 0),
+    recent_decisions = []
+    for row in recent_rows:
+        item = {
+            "timestamp": row[0],
+            "outcome": row[1],
+            "decision_source": row[2],
+            "action": row[3] or "-",
+            "confidence": float(row[4] or 0.0),
+            "buy_votes": int(row[5] or 0),
+            "sell_votes": int(row[6] or 0),
         }
-        for r in recent_rows
-    ]
+        if has_weighted:
+            item["weighted_buy"] = float(row[7] or 0.0)
+            item["weighted_sell"] = float(row[8] or 0.0)
+            item["total_weight"] = float(row[9] or 0.0)
+        recent_decisions.append(item)
 
     return {
         "symbol": symbol,

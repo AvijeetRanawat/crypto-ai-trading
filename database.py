@@ -134,6 +134,9 @@ def init_db():
             price REAL,
             buy_votes INTEGER,
             sell_votes INTEGER,
+            weighted_buy REAL,
+            weighted_sell REAL,
+            total_weight REAL,
             rsi REAL,
             macd TEXT,
             bb_pct REAL,
@@ -229,6 +232,9 @@ def init_db():
     _ensure_column(cursor, "signal_events", "deterministic_conf", "REAL")
     _ensure_column(cursor, "signal_events", "llm_cost_usd", "REAL")
     _ensure_column(cursor, "signal_events", "llm_tokens", "INTEGER")
+    _ensure_column(cursor, "signal_events", "weighted_buy", "REAL")
+    _ensure_column(cursor, "signal_events", "weighted_sell", "REAL")
+    _ensure_column(cursor, "signal_events", "total_weight", "REAL")
 
     # Seed single record
     cursor.execute('INSERT OR IGNORE INTO intent (id, message, targets) VALUES (1, "Scanning...", "[]")')
@@ -447,6 +453,9 @@ def save_signal_event(
     price,
     buy_votes,
     sell_votes,
+    weighted_buy,
+    weighted_sell,
+    total_weight,
     rsi,
     macd,
     bb_pct,
@@ -466,11 +475,11 @@ def save_signal_event(
     cursor.execute(
         """
         INSERT INTO signal_events (
-            timestamp, symbol, price, buy_votes, sell_votes, rsi, macd, bb_pct,
+            timestamp, symbol, price, buy_votes, sell_votes, weighted_buy, weighted_sell, total_weight, rsi, macd, bb_pct,
             outcome, claude_action, claude_conf, session_id, process_id,
             decision_source, deterministic_action, deterministic_conf, llm_cost_usd, llm_tokens
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             datetime.now().isoformat(),
@@ -478,6 +487,9 @@ def save_signal_event(
             price,
             buy_votes,
             sell_votes,
+            weighted_buy,
+            weighted_sell,
+            total_weight,
             round(rsi, 2),
             macd,
             round(bb_pct, 1),

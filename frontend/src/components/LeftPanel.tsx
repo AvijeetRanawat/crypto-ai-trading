@@ -96,6 +96,19 @@ export function LeftPanel({
   const priceDigits = useMemo(() => getPriceDigits(currentPrice), [currentPrice]);
 
   const perfSummary = useMemo(() => buildPerfSummary(trades), [trades]);
+  const signalConfidence = useMemo(() => {
+    if (!latestSignal) {
+      return { buyPct: 0, sellPct: 0 };
+    }
+    const weightedBuy = Number(latestSignal.weighted_buy ?? latestSignal.buy_votes ?? 0);
+    const weightedSell = Number(latestSignal.weighted_sell ?? latestSignal.sell_votes ?? 0);
+    const totalWeight = Number(latestSignal.total_weight ?? (weightedBuy + weightedSell));
+    const denom = Math.max(1, totalWeight);
+    return {
+      buyPct: Math.min(100, (weightedBuy / denom) * 100),
+      sellPct: Math.min(100, (weightedSell / denom) * 100),
+    };
+  }, [latestSignal]);
 
   useEffect(() => {
     if (!priceContainerRef.current || !signalContainerRef.current || priceChartRef.current) return;
@@ -218,18 +231,31 @@ export function LeftPanel({
     const history = signals
       .map((signal) => ({
         time: Math.floor(new Date(signal.timestamp).getTime() / 1000) as UTCTimestamp,
-        buy: Number(signal.buy_votes || 0),
-        sell: Number(signal.sell_votes || 0),
+        buy: Number(signal.weighted_buy ?? signal.buy_votes ?? 0),
+        sell: Number(signal.weighted_sell ?? signal.sell_votes ?? 0),
+        total: Number(signal.total_weight ?? ((signal.weighted_buy ?? signal.buy_votes ?? 0) + (signal.weighted_sell ?? signal.sell_votes ?? 0))),
       }))
       .filter((point) => point.time > 0)
       .sort((a, b) => a.time - b.time);
 
-    const signalByTime = new Map<number, { time: UTCTimestamp; buy: number; sell: number }>();
+    const signalByTime = new Map<number, { time: UTCTimestamp; buy: number; sell: number; total: number }>();
     history.forEach((point) => signalByTime.set(Number(point.time), point));
     const uniqueHistory = Array.from(signalByTime.values());
 
-    buySeriesRef.current.setData(uniqueHistory.map((point) => ({ time: point.time, value: point.buy })));
-    sellSeriesRef.current.setData(uniqueHistory.map((point) => ({ time: point.time, value: -point.sell })));
+    buySeriesRef.current.setData(
+      uniqueHistory.map((point) => {
+        const denom = Math.max(1, point.total);
+        const buyPct = Math.min(100, (point.buy / denom) * 100);
+        return { time: point.time, value: buyPct };
+      }),
+    );
+    sellSeriesRef.current.setData(
+      uniqueHistory.map((point) => {
+        const denom = Math.max(1, point.total);
+        const sellPct = Math.min(100, (point.sell / denom) * 100);
+        return { time: point.time, value: -sellPct };
+      }),
+    );
 
     const traded = signals.filter((signal) => signal.outcome === "TRADED");
     const missed = signals.filter((signal) => signal.outcome === "MISSED");
@@ -454,8 +480,8 @@ export function LeftPanel({
         <div className="chart-label-row">
           <span className="chart-label">SIGNAL INTELLIGENCE</span>
           <span className="legend-inline">
-            <span style={{ color: "var(--green)" }}>BUY</span>
-            <span style={{ color: "var(--red)" }}>SELL</span>
+            <span style={{ color: "var(--green)" }}>BUY {signalConfidence.buyPct.toFixed(0)}%</span>
+            <span style={{ color: "var(--red)" }}>SELL {signalConfidence.sellPct.toFixed(0)}%</span>
             <span style={{ color: "var(--yellow)" }}>MISSED</span>
             <span style={{ color: "var(--accent)" }}>TRADED</span>
           </span>
