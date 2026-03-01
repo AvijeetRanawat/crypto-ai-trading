@@ -133,6 +133,36 @@ body {
     letter-spacing: 1px;
 }
 
+.trading-mode-tabs {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--tile-bg);
+}
+
+.trading-mode-tab {
+    border: 0;
+    border-right: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 9px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+}
+
+.trading-mode-tab:last-child {
+    border-right: 0;
+}
+
+.trading-mode-tab.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent), transparent 85%);
+}
+
 .topbar-right {
     display: flex;
     gap: 0.85rem;
@@ -364,14 +394,15 @@ body {
 /* ── BOTTOM ROW ── */
 .bottom-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1.35fr 0.9fr 0.85fr;
     gap: 0.6rem;
     height: 140px;
     flex-shrink: 0;
 }
 
 .equity-card,
-.trades-card {
+.trades-card,
+.rl-cost-card {
     padding: 0.75rem;
     overflow: hidden;
     display: flex;
@@ -386,6 +417,27 @@ body {
 .trades-list {
     overflow-y: auto;
     flex: 1;
+}
+
+.rl-cost-grid {
+    display: grid;
+    gap: 0.22rem;
+    font-size: 11px;
+    font-family: var(--mono);
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.rl-cost-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding: 2px 0;
+}
+
+.rl-cost-row:last-child {
+    border-bottom: none;
 }
 
 .trade-row {
@@ -643,6 +695,47 @@ body {
     color: var(--text);
     font-size: 12px;
     font-weight: 700;
+}
+
+.strategy-metrics {
+    margin-top: 0.5rem;
+}
+
+.strategy-recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 130px;
+    overflow-y: auto;
+}
+
+.strategy-recent-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.35rem 0.45rem;
+    background: var(--tile-bg);
+}
+
+.strategy-recent-head {
+    font-size: 10px;
+    color: var(--text);
+}
+
+.strategy-recent-sub {
+    font-size: 9px;
+    color: var(--muted);
+}
+
+.strategy-reason {
+    margin-top: 0.55rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.45rem;
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.45;
 }
 
 .llm-breakdown-wrap {

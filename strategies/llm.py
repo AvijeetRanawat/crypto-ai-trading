@@ -35,6 +35,26 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text or "") / 4))
 
 
+def _bedrock_model_candidates(model_id: str) -> list:
+    raw = str(model_id or "").strip()
+    out = []
+    profile = str(getattr(config, "BEDROCK_INFERENCE_PROFILE_ID", "") or "").strip()
+    if profile:
+        out.append(profile)
+    if raw:
+        out.append(raw)
+        if not (raw.startswith("us.") or raw.startswith("eu.") or raw.startswith("apac.") or raw.startswith("arn:")):
+            out.append(f"us.{raw}")
+    # de-dupe while preserving order
+    seen = set()
+    uniq = []
+    for m in out:
+        if m and m not in seen:
+            seen.add(m)
+            uniq.append(m)
+    return uniq
+
+
 class LLMAgent(BaseStrategy):
     """
     AWS Bedrock LLM tie-breaker agent.
@@ -63,7 +83,7 @@ class LLMAgent(BaseStrategy):
             return
 
         try:
-            self.bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+            self.bedrock = boto3.client(service_name="bedrock-runtime", region_name=config.AWS_DEFAULT_REGION)
             self.ready = True
             logger.info(f"Initialized AWS Bedrock client for model: {config.BEDROCK_MODEL_ID}")
         except Exception as e:
@@ -174,19 +194,34 @@ class LLMAgent(BaseStrategy):
             return self._invoke_openai_with_usage(model_id, stage, prompt, max_tokens, temperature)
 
         started = time.time()
-        response = self.bedrock.invoke_model(
-            body=json.dumps(
-                {
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-                }
-            ),
-            modelId=model_id,
-            accept="application/json",
-            contentType="application/json",
+        request_body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            }
         )
+        response = None
+        used_model_id = model_id
+        last_error = None
+        for candidate in _bedrock_model_candidates(model_id):
+            try:
+                logger.info("BEDROCK_REQ invoke_model stage=%s model=%s", stage, candidate)
+                response = self.bedrock.invoke_model(
+                    body=request_body,
+                    modelId=candidate,
+                    accept="application/json",
+                    contentType="application/json",
+                )
+                used_model_id = candidate
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("BEDROCK_RETRY model=%s stage=%s err=%s", candidate, stage, e)
+                continue
+        if response is None:
+            raise last_error or RuntimeError("Bedrock invoke failed")
         latency_ms = int((time.time() - started) * 1000)
 
         payload = json.loads(response.get("body").read())
@@ -194,17 +229,31 @@ class LLMAgent(BaseStrategy):
         text = ""
         if content and isinstance(content, list):
             text = content[0].get("text", "")
+        if not text:
+            choices = payload.get("choices") or []
+            if choices and isinstance(choices, list):
+                text = ((choices[0] or {}).get("message") or {}).get("content", "") or ""
         usage = payload.get("usage", {}) or {}
-        in_tok = int(usage.get("input_tokens") or usage.get("inputTokens") or _estimate_tokens(prompt))
-        out_tok = int(usage.get("output_tokens") or usage.get("outputTokens") or _estimate_tokens(text))
+        in_tok = int(
+            usage.get("input_tokens")
+            or usage.get("inputTokens")
+            or usage.get("prompt_tokens")
+            or _estimate_tokens(prompt)
+        )
+        out_tok = int(
+            usage.get("output_tokens")
+            or usage.get("outputTokens")
+            or usage.get("completion_tokens")
+            or _estimate_tokens(text)
+        )
         total_tok = int(usage.get("total_tokens") or usage.get("totalTokens") or (in_tok + out_tok))
 
-        in_price, out_price = self._pricing_per_1m(model_id)
+        in_price, out_price = self._pricing_per_1m(used_model_id)
         cost = round((in_tok / 1_000_000) * in_price + (out_tok / 1_000_000) * out_price, 8)
 
         usage_event = {
             "stage": stage,
-            "model_id": model_id,
+            "model_id": used_model_id,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "total_tokens": total_tok,

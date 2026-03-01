@@ -13,5 +13,24 @@ export default defineConfig({
   build: {
     outDir: "../static/dist",
     emptyOutDir: true
-  }
+  },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: "./src/test/setup.ts",
+    css: true,
+    coverage: {
+      provider: "v8",
+      include: [
+        "src/services/dashboardApi.ts",
+        "src/utils/format.ts",
+      ],
+      thresholds: {
+        lines: 100,
+        functions: 100,
+        branches: 100,
+        statements: 100,
+      },
+    },
+  },
 });

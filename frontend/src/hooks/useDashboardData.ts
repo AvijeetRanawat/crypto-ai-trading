@@ -3,9 +3,11 @@ import { dashboardApi } from "../services/dashboardApi";
 import {
   DEFAULT_INTENT,
   DEFAULT_LLM_BREAKDOWN,
+  DEFAULT_RL_COST_SUMMARY,
   DEFAULT_LLM_SUMMARY,
   DEFAULT_NEWS_SENTIMENT,
   DEFAULT_REGIME,
+  DEFAULT_STRATEGY_DIAGNOSTICS,
   DEFAULT_SUMMARY,
   DEFAULT_WARMUP,
   type IntentData,
@@ -16,11 +18,14 @@ import {
   type NewsSentiment,
   type PortfolioSummary,
   type RegimeData,
+  type RlCostSummary,
   type SignalEvent,
+  type StrategyDiagnostics,
   type Trade,
   type WarmupData,
 } from "../types/dashboard";
 import { STORAGE_KEYS } from "../utils/constants";
+import type { TradingMode } from "../utils/constants";
 
 interface DashboardDataState {
   nowMs: number;
@@ -37,12 +42,14 @@ interface DashboardDataState {
   llmSummary: LlmSummary;
   llmBreakdown: LlmBreakdown;
   newsSentiment: NewsSentiment;
+  strategyDiagnostics: StrategyDiagnostics;
+  rlCostSummary: RlCostSummary;
 }
 
 const FAST_POLL_MS = 3000;
 const SLOW_POLL_MS = 8000;
 
-export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
+export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = "SPOT"): DashboardDataState {
   const [nowMs, setNowMs] = useState(Date.now());
   const [startTimeMs, setStartTimeMs] = useState<number>(() => {
     const stored = localStorage.getItem(STORAGE_KEYS.sessionStartMs);
@@ -61,6 +68,8 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
   const [llmSummary, setLlmSummary] = useState<LlmSummary>(DEFAULT_LLM_SUMMARY);
   const [llmBreakdown, setLlmBreakdown] = useState<LlmBreakdown>(DEFAULT_LLM_BREAKDOWN);
   const [newsSentiment, setNewsSentiment] = useState<NewsSentiment>(DEFAULT_NEWS_SENTIMENT);
+  const [strategyDiagnostics, setStrategyDiagnostics] = useState<StrategyDiagnostics>(DEFAULT_STRATEGY_DIAGNOSTICS);
+  const [rlCostSummary, setRlCostSummary] = useState<RlCostSummary>(DEFAULT_RL_COST_SUMMARY);
 
   const sessionStartRef = useRef<string | null>(localStorage.getItem(STORAGE_KEYS.sessionStart));
   const fastPollInFlightRef = useRef(false);
@@ -79,7 +88,9 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     setLlmSummary({ ...DEFAULT_LLM_SUMMARY });
     setLlmBreakdown({ ...DEFAULT_LLM_BREAKDOWN });
     setNewsSentiment({ ...DEFAULT_NEWS_SENTIMENT });
-  }, []);
+    setStrategyDiagnostics({ ...DEFAULT_STRATEGY_DIAGNOSTICS, symbol, mode: tradingMode });
+    setRlCostSummary({ ...DEFAULT_RL_COST_SUMMARY });
+  }, [symbol, tradingMode]);
 
   const syncSessionStart = useCallback(async () => {
     const data = await dashboardApi.sessionStart();
@@ -118,7 +129,7 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
           dashboardApi.warmup(symbol),
           dashboardApi.marketHistory(symbol),
           dashboardApi.portfolioSummary(),
-          dashboardApi.intent(),
+          dashboardApi.intent(tradingMode),
           dashboardApi.signals(symbol, 60),
           dashboardApi.regime(symbol),
         ]);
@@ -142,13 +153,15 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
       slowPollInFlightRef.current = true;
       lastSlowPollAtRef.current = now;
       try {
-        const [tradeData, lessonData, logData, usage, breakdown, news] = await Promise.all([
-        dashboardApi.tradesRecent(),
-        dashboardApi.lessons(),
-        dashboardApi.logs(120),
-        dashboardApi.llmSummary(),
+        const [tradeData, lessonData, logData, usage, breakdown, diagnostics, news, rlCost] = await Promise.all([
+          dashboardApi.tradesRecent(),
+          dashboardApi.lessons(),
+          dashboardApi.logs(120),
+          dashboardApi.llmSummary(),
           dashboardApi.llmBreakdown(),
+          dashboardApi.strategyDiagnostics(symbol, tradingMode),
           dashboardApi.newsSentiment(symbol),
+          dashboardApi.rlCost(),
         ]);
 
         if (!active) return;
@@ -157,7 +170,9 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
         if (logData?.logs) setLogs(logData.logs.join("").trim());
         if (usage) setLlmSummary(usage);
         if (breakdown) setLlmBreakdown(breakdown);
+        if (diagnostics) setStrategyDiagnostics(diagnostics);
         if (news) setNewsSentiment(news);
+        if (rlCost) setRlCostSummary(rlCost);
       } finally {
         slowPollInFlightRef.current = false;
       }
@@ -176,7 +191,7 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
       clearInterval(slowInterval);
       clearInterval(clockInterval);
     };
-  }, [symbol, syncSessionStart]);
+  }, [symbol, tradingMode, syncSessionStart]);
 
   return {
     nowMs,
@@ -193,5 +208,7 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     llmSummary,
     llmBreakdown,
     newsSentiment,
+    strategyDiagnostics,
+    rlCostSummary,
   };
 }

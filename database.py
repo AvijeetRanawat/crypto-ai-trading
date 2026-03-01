@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -100,6 +101,16 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS intent_mode (
+            mode TEXT PRIMARY KEY,
+            timestamp TEXT,
+            message TEXT,
+            targets TEXT
+        )
+        """
+    )
 
     # Prices Table
     cursor.execute(
@@ -163,6 +174,32 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(timestamp)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_session ON llm_usage(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_stage ON llm_usage(stage)")
+
+    # RL Events Table (reward/penalty attribution)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rl_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            session_id TEXT,
+            process_id INTEGER,
+            symbol TEXT,
+            mode TEXT,
+            profile_id TEXT,
+            state_key TEXT,
+            event_type TEXT,
+            reason TEXT,
+            reward REAL,
+            penalty REAL,
+            raw_penalty REAL,
+            pnl_reward REAL,
+            hold_secs REAL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rl_events_ts ON rl_events(timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rl_events_session ON rl_events(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rl_events_type ON rl_events(event_type)")
 
     # Strategy Rules Table (Distilled knowledge)
     cursor.execute(
@@ -309,24 +346,42 @@ def save_lesson(condition, lesson, severity="INFO"):
     conn.close()
 
 
-def update_intent(message, targets_list):
+def update_intent(message, targets_list, mode: str = None):
     conn = _conn()
     cursor = conn.cursor()
     cursor.execute(
         """
         UPDATE intent SET timestamp = ?, message = ?, targets = ? WHERE id = 1
         """,
-        (datetime.now().isoformat(), message, str(targets_list)),
+        (datetime.now().isoformat(), message, json.dumps(targets_list)),
     )
+    if mode:
+        mode_norm = str(mode).upper()
+        cursor.execute(
+            """
+            INSERT INTO intent_mode (mode, timestamp, message, targets)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(mode) DO UPDATE SET
+                timestamp=excluded.timestamp,
+                message=excluded.message,
+                targets=excluded.targets
+            """,
+            (mode_norm, datetime.now().isoformat(), message, json.dumps(targets_list)),
+        )
     conn.commit()
     conn.close()
 
 
-def get_intent():
+def get_intent(mode: str = None):
     conn = _conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM intent WHERE id = 1")
-    intent = cursor.fetchone()
+    intent = None
+    if mode:
+        cursor.execute("SELECT * FROM intent_mode WHERE mode = ?", (str(mode).upper(),))
+        intent = cursor.fetchone()
+    if not intent:
+        cursor.execute("SELECT * FROM intent WHERE id = 1")
+        intent = cursor.fetchone()
     conn.close()
     return intent
 
@@ -478,6 +533,52 @@ def save_llm_usage(
             int(latency_ms or 0),
             float(estimated_cost_usd or 0.0),
             decision_context,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_rl_event(
+    mode: str,
+    profile_id: str,
+    state_key: str,
+    event_type: str,
+    reason: str = None,
+    symbol: str = None,
+    reward: float = 0.0,
+    penalty: float = 0.0,
+    raw_penalty: float = 0.0,
+    pnl_reward: float = 0.0,
+    hold_secs: float = 0.0,
+    session_id: str = None,
+    process_id: int = None,
+):
+    conn = _conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO rl_events (
+            timestamp, session_id, process_id, symbol, mode, profile_id, state_key,
+            event_type, reason, reward, penalty, raw_penalty, pnl_reward, hold_secs
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.now().isoformat(),
+            session_id or _runtime_session_id(),
+            process_id or _runtime_process_id(),
+            symbol,
+            mode,
+            profile_id,
+            state_key,
+            event_type,
+            reason,
+            float(reward or 0.0),
+            float(penalty or 0.0),
+            float(raw_penalty or 0.0),
+            float(pnl_reward or 0.0),
+            float(hold_secs or 0.0),
         ),
     )
     conn.commit()

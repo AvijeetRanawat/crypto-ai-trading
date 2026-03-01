@@ -1,6 +1,8 @@
 import asyncio
+import os
 from datetime import datetime, timedelta
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from logger import logger, log_trade
 from config import config
 from database import (
@@ -10,6 +12,7 @@ from database import (
     update_intent,
     save_signal_event,
     save_llm_usage,
+    save_rl_event,
     get_llm_cost_today,
     get_llm_call_count_last_hour,
     get_runtime_context,
@@ -30,105 +33,15 @@ from strategies.tools import (
 )
 import sys
 from news_sentiment import build_sentiment_snapshot
-
-# ─────────────────────────────────────────
-#  Paper Trading Simulator
-# ─────────────────────────────────────────
-class PaperTradingSimulator:
-    def __init__(self):
-        self.balance_usdt = 1_250.0
-        self.positions = {}
-
-    def enter_position(
-        self,
-        symbol,
-        price,
-        amount_usdt,
-        reason,
-        side="LONG",
-        decision_source=None,
-        deterministic_conf=None,
-        llm_conf=None,
-        llm_cost_usd=None,
-    ):
-        if not config.is_symbol_allowed(symbol):
-            logger.error(f"Blocked non-allowlisted trade symbol: {symbol}")
-            return False
-
-        if self.balance_usdt < amount_usdt:
-            logger.warning(f"Insufficient balance for {symbol}")
-            return False
-
-        quantity = amount_usdt / price
-        self.balance_usdt -= amount_usdt
-        entry_time = datetime.now()
-        
-        db_id = save_trade(
-            symbol,
-            side,
-            price,
-            quantity,
-            entry_time,
-            reason,
-            decision_source=decision_source,
-            deterministic_conf=deterministic_conf,
-            llm_conf=llm_conf,
-            llm_cost_usd=llm_cost_usd,
-        )
-
-        self.positions[symbol] = {
-            "side": side,
-            "entry_price": price,
-            "quantity": quantity,
-            "entry_time": entry_time,
-            "db_id": db_id,
-            "entry_reason": reason,
-            "peak_pnl_pct": 0.0,       # Track peak for trailing stop
-            "trailing_active": False,   # Trailing stop activated?
-        }
-        log_trade(side, symbol, price, quantity, reason, trade_id=db_id)
-        save_portfolio_snapshot(self.balance_usdt, len(self.positions))
-        
-        emoji = "📈" if side == "LONG" else "📉"
-        logger.info(f"{emoji} {side}: {symbol} at ${price:,.2f} | Size: ${amount_usdt:,.0f} | Bal: ${self.balance_usdt:,.0f}")
-        return True
-
-    def exit_position(self, symbol, current_price, reason):
-        if symbol not in self.positions:
-            return None
-
-        pos = self.positions.pop(symbol)
-        side = pos["side"]
-        
-        if side == "LONG":
-            revenue = pos["quantity"] * current_price
-            profit = revenue - (pos["quantity"] * pos["entry_price"])
-        else:
-            profit = (pos["entry_price"] - current_price) * pos["quantity"]
-            revenue = (pos["quantity"] * pos["entry_price"]) + profit
-            
-        self.balance_usdt += revenue
-        exit_time = datetime.now()
-        hold_secs = (exit_time - pos["entry_time"]).seconds
-
-        update_trade_exit(pos["db_id"], exit_time, profit)
-        pnl_str = f"+${profit:.2f}" if profit >= 0 else f"-${abs(profit):.2f}"
-        
-        log_trade("CLOSE", symbol, current_price, pos["quantity"],
-                  f"{reason} | PnL: {pnl_str} | Held: {hold_secs}s", trade_id=pos["db_id"])
-
-        save_portfolio_snapshot(self.balance_usdt, len(self.positions))
-        
-        emoji = "✅" if profit >= 0 else "❌"
-        logger.info(f"{emoji} CLOSED {side} {symbol} at ${current_price:,.2f} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}")
-        
-        return {
-            "symbol": symbol, "side": side,
-            "entry_price": pos["entry_price"], "exit_price": current_price,
-            "hold_secs": hold_secs, "entry_reason": pos["entry_reason"],
-            "pnl": profit,
-        }
-
+from rl_agent import RLWeightAgent, MLXWeightAgent, is_mlx_available
+from engine_simulator import PaperTradingSimulator
+from engine_rl_helpers import (
+    rl_infer,
+    rl_apply_weight_multipliers,
+    attach_rl_metadata,
+    rl_reward_skip_opportunity,
+    rl_loss_penalty_cap,
+)
 
 # ─────────────────────────────────────────
 #  Self-Improving Engine v5 — Advanced Agent Suite
@@ -182,24 +95,80 @@ class TradingEngine:
         self.trades_executed = 0
         self.trades_closed = 0
         self.total_session_pnl = 0.0
-        self.skipped_cycles = 0
+        self.skipped_cycles_by_mode: dict[str, int] = {}
         self.last_llm_call = None
         self.missed_opportunities_count = 0
-        self.last_entry_prices: dict = {}      # symbol -> (price, side, timestamp)
-        self.direction_block: dict = {}         # symbol -> {side, blocked_until}
-        self.last_close_time = None             # Fix 5: post-close cooldown
+        self.last_entry_prices: dict = {}      # key(symbol:mode) -> (price, side, timestamp)
+        self.direction_block: dict = {}         # key(symbol:mode) -> {side, blocked_until}
+        self.last_close_time_by_mode: dict[str, datetime] = {}
         self.symbol_drift_alerted = set()
         self.consecutive_losses = 0
         self.trading_halted_reason = None
         self.session_start_balance = self.simulator.balance_usdt
+        self.parallel_products = list(config.PARALLEL_PRODUCTS)
+        self.enable_parallel_products = bool(config.ENABLE_PARALLEL_PRODUCT_STRATEGIES)
+        if bool(config.ENABLE_MLX_RL_AGENT) and is_mlx_available():
+            self.rl_agent = MLXWeightAgent(
+                state_file=os.path.join(os.path.dirname(__file__), "data", "rl_weights.json"),
+                enabled=bool(config.ENABLE_RL_WEIGHT_AGENT),
+                epsilon=float(config.RL_EPSILON),
+                min_epsilon=float(config.RL_MIN_EPSILON),
+                epsilon_decay=float(config.RL_EPSILON_DECAY),
+                learning_rate=float(config.RL_MLX_LEARNING_RATE),
+                hidden_size=int(config.RL_MLX_HIDDEN_SIZE),
+            )
+        else:
+            self.rl_agent = RLWeightAgent(
+                state_file=os.path.join(os.path.dirname(__file__), "data", "rl_weights.json"),
+                enabled=bool(config.ENABLE_RL_WEIGHT_AGENT),
+                epsilon=float(config.RL_EPSILON),
+                min_epsilon=float(config.RL_MIN_EPSILON),
+                epsilon_decay=float(config.RL_EPSILON_DECAY),
+                learning_rate=float(config.RL_LEARNING_RATE),
+            )
+        self._pending_rl_by_symbol = {}
+        self.policy_executor = ThreadPoolExecutor(
+            max_workers=max(1, len(self.parallel_products)),
+            thread_name_prefix="policy-worker",
+        )
         
         logger.info(f"Engine ready. Watching: {sorted(self.allowed_symbols)}")
+        logger.info(f"  Product: {config.TRADING_PRODUCT}")
+        logger.info(
+            "  Parallel products: enabled=%s products=%s",
+            self.enable_parallel_products,
+            self.parallel_products,
+        )
+
+    @staticmethod
+    def _pos_key(symbol: str, mode: str) -> str:
+        return f"{str(symbol).upper()}:{str(mode).upper()}"
+
+    def _positions_for_mode(self, mode: str) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        return {k: v for k, v in (self.simulator.positions or {}).items() if v.get("mode") == active_mode}
+
+    @staticmethod
+    def _mode_decision_source(mode: str, decision_source: str) -> str:
+        if not decision_source:
+            return decision_source
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        prefix = f"{active_mode}_"
+        if str(decision_source).upper().startswith(prefix):
+            return decision_source
+        return f"{active_mode}_{decision_source}"
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
         logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
         logger.info(
             f"  LLM budget/day: ${config.LLM_DAILY_BUDGET_USD:.2f} | "
             f"LLM max calls/hour: {config.LLM_MAX_CALLS_PER_HOUR} | "
             f"Max drawdown: ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
+        )
+        logger.info(
+            "  RL weight agent: enabled=%s eps=%.3f lr=%.3f",
+            bool(config.ENABLE_RL_WEIGHT_AGENT),
+            float(config.RL_EPSILON),
+            float(config.RL_LEARNING_RATE),
         )
 
     def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result,
@@ -248,6 +217,88 @@ class TradingEngine:
             logger.error(f"Tool failure ({name}): {e}")
             return fallback
 
+    @staticmethod
+    def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+        return max(low, min(high, float(value)))
+
+    def _rl_infer(
+        self,
+        mode: str,
+        regime: str,
+        session_quality: str,
+        volatility_pct: float,
+        sentiment_score: float,
+        vote_imbalance: float,
+        expected_edge_pct: float,
+    ) -> dict:
+        return rl_infer(
+            self,
+            mode=mode,
+            regime=regime,
+            session_quality=session_quality,
+            volatility_pct=volatility_pct,
+            sentiment_score=sentiment_score,
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=expected_edge_pct,
+        )
+
+    def _rl_apply_weight_multipliers(self, weights: dict, rl_inference: dict) -> dict:
+        return rl_apply_weight_multipliers(weights, rl_inference)
+
+    def _attach_rl_metadata(self, mode: str, result: dict, kwargs: dict) -> dict:
+        return attach_rl_metadata(self, mode, result, kwargs)
+
+    def _rl_reward_skip_opportunity(
+        self,
+        mode: str,
+        policy_eval: dict,
+        expected_edge_pct: float,
+        reason: str,
+        symbol: str = None,
+    ):
+        rl_reward_skip_opportunity(self, mode, policy_eval, expected_edge_pct, reason, symbol)
+
+    def _rl_penalize_skip(
+        self,
+        mode: str,
+        reason: str,
+        expected_edge_pct: float,
+        symbol: str = None,
+        regime_result: dict = None,
+        session_filt: dict = None,
+        vol_result: dict = None,
+        sentiment_snapshot: dict = None,
+        buy_count: int = 0,
+        sell_count: int = 0,
+    ):
+        if not bool(config.ENABLE_RL_WEIGHT_AGENT):
+            return
+        vote_imbalance = min(1.0, abs(int(buy_count or 0) - int(sell_count or 0)) / 8.0)
+        rl_inf = self._rl_infer(
+            mode=str(mode or config.TRADING_PRODUCT).upper(),
+            regime=str((regime_result or {}).get("regime", "UNKNOWN")).upper(),
+            session_quality=str((session_filt or {}).get("quality", "LOW")).upper(),
+            volatility_pct=float((vol_result or {}).get("volatility_pct", 0.0) or 0.0),
+            sentiment_score=float((sentiment_snapshot or {}).get("sentiment_score", 0.0) or 0.0),
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=float(expected_edge_pct or 0.0),
+        )
+        policy_eval = {
+            "rl_profile_id": rl_inf.get("profile_id", ""),
+            "rl_state_key": rl_inf.get("state_key", ""),
+        }
+        self._rl_reward_skip_opportunity(
+            mode=str(mode or config.TRADING_PRODUCT).upper(),
+            policy_eval=policy_eval,
+            expected_edge_pct=expected_edge_pct,
+            reason=reason,
+            symbol=symbol,
+        )
+
+    @staticmethod
+    def _rl_loss_penalty_cap(pnl_reward: float = None) -> float:
+        return rl_loss_penalty_cap(pnl_reward)
+
     def _register_llm_usage(self, symbol: str, usage_events: list, context: str):
         for ev in usage_events or []:
             try:
@@ -265,7 +316,7 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"Failed to save llm_usage: {e}")
 
-    def _sentiment_gate(self, symbol: str, proposed_dir: str):
+    def _sentiment_gate(self, symbol: str, proposed_dir: str, snapshot: dict = None):
         """
         Sentiment-aware entry gate.
         Returns: (allowed: bool, verdict: str)
@@ -274,11 +325,12 @@ class TradingEngine:
             return True, "Sentiment gate disabled"
 
         try:
-            snapshot = build_sentiment_snapshot(
-                alpha_key=config.ALPHAVANTAGE_API_KEY,
-                cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
-                symbol=symbol,
-            )
+            if snapshot is None:
+                snapshot = build_sentiment_snapshot(
+                    alpha_key=config.ALPHAVANTAGE_API_KEY,
+                    cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+                    symbol=symbol,
+                )
             score = float(snapshot.get("sentiment_score", 0.0))
             label = str(snapshot.get("sentiment_label", "NEUTRAL"))
             components = snapshot.get("components", {}) or {}
@@ -345,6 +397,1004 @@ class TradingEngine:
         conf = min(0.82, 0.50 + (agreement * 0.04) + (margin * 0.02))
         return action, conf, "deterministic borderline setup"
 
+    def _futures_policy_decision(
+        self,
+        symbol: str,
+        proposed_dir: str,
+        buy_count: int,
+        sell_count: int,
+        confidence: float,
+        expected_edge_pct: float,
+        regime_result: dict,
+        session_filt: dict,
+        vol_result: dict,
+        vol_prof: dict,
+        sentiment_snapshot: dict,
+        vel_result: dict,
+        macd_result: dict,
+        ema_result: dict,
+        ob_result: dict,
+        mode: str = None,
+        enforce_confidence_gate: bool = True,
+    ) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "FUTURES":
+            return {
+                "allow": True,
+                "composite_score": 1.0,
+                "recommended_leverage": 1,
+                "size_multiplier": 1.0,
+                "verdict": "Spot/options mode active",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "",
+            }
+
+        is_long = proposed_dir == "LONG"
+        confidence = self._clamp(confidence)
+        regime_strength = float(regime_result.get("strength", 0.0) or 0.0)
+        vol_pct = float(vol_result.get("volatility_pct", 0.0) or 0.0)
+        spread_pct = float(vol_prof.get("spread_pct", 0.0) or 0.0)
+        volume_24h = float(vol_prof.get("volume_24h", 0.0) or 0.0)
+        session_quality = str(session_filt.get("quality", "LOW")).upper()
+
+        if regime_strength < config.FUTURES_MIN_REGIME_STRENGTH:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "size_multiplier": config.FUTURES_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Futures reject: weak trend strength ({regime_strength:.2f} < "
+                    f"{config.FUTURES_MIN_REGIME_STRENGTH:.2f})"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "weak_regime",
+            }
+
+        if vol_pct > config.FUTURES_EXTREME_VOL_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "size_multiplier": config.FUTURES_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Futures reject: extreme volatility {vol_pct:.3f}% > "
+                    f"{config.FUTURES_EXTREME_VOL_PCT:.3f}%"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "extreme_volatility",
+            }
+
+        if spread_pct > config.FUTURES_MAX_SPREAD_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "size_multiplier": config.FUTURES_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Futures reject: spread too wide {spread_pct:.3f}% > "
+                    f"{config.FUTURES_MAX_SPREAD_PCT:.3f}%"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "wide_spread",
+            }
+
+        if volume_24h < config.FUTURES_MIN_VOLUME_24H:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "size_multiplier": config.FUTURES_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Futures reject: low liquidity volume {volume_24h:.2f} < "
+                    f"{config.FUTURES_MIN_VOLUME_24H:.2f}"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "low_liquidity",
+            }
+
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+        regime_score = self._clamp(regime_strength / max(config.FUTURES_MIN_REGIME_STRENGTH * 2.2, 0.30))
+
+        vel_1m = float(vel_result.get("velocity_1m", 0.0) or 0.0)
+        vel_5m = float(vel_result.get("velocity_5m", 0.0) or 0.0)
+        directional_vel = ((vel_1m * 0.7) + (vel_5m * 0.3)) * (1 if is_long else -1)
+        velocity_score = self._clamp(0.5 + (directional_vel / 0.25))
+
+        macd_signal = str(macd_result.get("crossover", "")).upper()
+        if is_long:
+            macd_score = 1.0 if "BULLISH_CROSS" in macd_signal else (0.82 if "BULL" in macd_signal else 0.28)
+        else:
+            macd_score = 1.0 if "BEARISH_CROSS" in macd_signal else (0.82 if "BEAR" in macd_signal else 0.28)
+
+        ema_signal = str(ema_result.get("signal", "")).upper()
+        if is_long:
+            ema_score = 1.0 if ema_signal == "STRONG_BUY" else (0.82 if ema_signal == "BUY" else 0.25)
+        else:
+            ema_score = 1.0 if ema_signal == "STRONG_SELL" else (0.82 if ema_signal == "SELL" else 0.25)
+
+        ob_bias = float(ob_result.get("bias", 0.0) or 0.0)
+        directional_ob = ob_bias * (1 if is_long else -1)
+        ob_score = self._clamp(0.5 + (directional_ob / 0.12))
+        momentum_score = round((velocity_score * 0.45) + (macd_score * 0.30) + (ema_score * 0.15) + (ob_score * 0.10), 4)
+
+        low_vol = max(config.FUTURES_TARGET_VOL_PCT_LOW, 0.0001)
+        high_vol = max(config.FUTURES_TARGET_VOL_PCT_HIGH, low_vol + 0.01)
+        extreme_vol = max(config.FUTURES_EXTREME_VOL_PCT, high_vol + 0.01)
+        if vol_pct <= low_vol:
+            volatility_score = self._clamp((vol_pct / low_vol) * 0.8)
+        elif vol_pct <= high_vol:
+            volatility_score = 1.0
+        else:
+            decay = (vol_pct - high_vol) / max(extreme_vol - high_vol, 0.01)
+            volatility_score = self._clamp(1.0 - decay)
+
+        volume_score = self._clamp(volume_24h / max(config.FUTURES_MIN_VOLUME_24H * 2.0, 1.0))
+        spread_score = self._clamp((config.FUTURES_MAX_SPREAD_PCT - spread_pct) / max(config.FUTURES_MAX_SPREAD_PCT, 0.001))
+        liquidity_score = round((volume_score * 0.55) + (spread_score * 0.45), 4)
+
+        sentiment_score = 0.55
+        sentiment_val = 0.0
+        article_count = 0
+        if sentiment_snapshot:
+            sentiment_val = float(sentiment_snapshot.get("sentiment_score", 0.0) or 0.0)
+            comp = sentiment_snapshot.get("components", {}) or {}
+            article_count = int(comp.get("articles_count", 0) or 0)
+            directional_sentiment = sentiment_val if is_long else -sentiment_val
+            if article_count >= config.SENTIMENT_MIN_ARTICLES:
+                sentiment_score = self._clamp(0.5 + directional_sentiment)
+                if (
+                    config.FUTURES_BLOCK_ON_OPPOSING_SENTIMENT
+                    and directional_sentiment < -config.SENTIMENT_DIRECTIONAL_FLOOR
+                ):
+                    return {
+                        "allow": False,
+                        "composite_score": 0.0,
+                        "recommended_leverage": 1,
+                        "size_multiplier": config.FUTURES_SIZE_MIN_MULT,
+                        "verdict": (
+                            f"Futures reject: sentiment opposes {proposed_dir} "
+                            f"({sentiment_val:+.2f}, articles={article_count})"
+                        ),
+                        "component_scores": {},
+                        "penalties": {},
+                        "hard_reject_reason": "sentiment_conflict",
+                    }
+
+        session_map = {"PREMIUM": 1.0, "HIGH": 0.88, "MODERATE": 0.75, "LOW": 0.58}
+        session_score = session_map.get(session_quality, 0.60)
+        rl_inf = self._rl_infer(
+            mode="FUTURES",
+            regime=str(regime_result.get("regime", "UNKNOWN")).upper(),
+            session_quality=session_quality,
+            volatility_pct=vol_pct,
+            sentiment_score=sentiment_val,
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=expected_edge_pct,
+        )
+
+        weights = {
+            "vote_imbalance": max(0.0, float(config.FUTURES_WEIGHT_VOTE_IMBALANCE)),
+            "regime": max(0.0, float(config.FUTURES_WEIGHT_REGIME)),
+            "momentum": max(0.0, float(config.FUTURES_WEIGHT_MOMENTUM)),
+            "volatility": max(0.0, float(config.FUTURES_WEIGHT_VOLATILITY)),
+            "liquidity": max(0.0, float(config.FUTURES_WEIGHT_LIQUIDITY)),
+            "sentiment": max(0.0, float(config.FUTURES_WEIGHT_SENTIMENT)),
+            "session": max(0.0, float(config.FUTURES_WEIGHT_SESSION)),
+        }
+        weights = self._rl_apply_weight_multipliers(weights, rl_inf)
+        w_sum = sum(weights.values()) or 1.0
+        weighted_core = (
+            weights["vote_imbalance"] * vote_imbalance
+            + weights["regime"] * regime_score
+            + weights["momentum"] * momentum_score
+            + weights["volatility"] * volatility_score
+            + weights["liquidity"] * liquidity_score
+            + weights["sentiment"] * sentiment_score
+            + weights["session"] * session_score
+        ) / w_sum
+
+        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.5, 0.25))
+        confidence_score = self._clamp(confidence + float(rl_inf.get("confidence_bias", 0.0)))
+        composite_score = self._clamp((weighted_core * 0.82) + (edge_score * 0.10) + (confidence_score * 0.08))
+
+        penalties = {}
+        if session_quality == "LOW":
+            penalties["off_hours"] = config.FUTURES_OFF_HOURS_PENALTY
+            composite_score -= config.FUTURES_OFF_HOURS_PENALTY
+        if self.consecutive_losses > 0:
+            loss_penalty = min(0.25, self.consecutive_losses * config.FUTURES_LOSS_STREAK_PENALTY)
+            penalties["loss_streak"] = loss_penalty
+            composite_score -= loss_penalty
+        composite_score = self._clamp(composite_score)
+
+        conf_gate = confidence >= config.FUTURES_MIN_CONFIDENCE if enforce_confidence_gate else True
+        allow = composite_score >= config.FUTURES_MIN_COMPOSITE_SCORE and conf_gate
+
+        min_lev = config.FUTURES_MIN_LEVERAGE
+        max_lev = max(min_lev, config.FUTURES_MAX_LEVERAGE)
+        score_span = self._clamp(
+            (composite_score - config.FUTURES_MIN_COMPOSITE_SCORE)
+            / max(1.0 - config.FUTURES_MIN_COMPOSITE_SCORE, 0.001)
+        )
+        rec_lev = int(round(min_lev + score_span * (max_lev - min_lev)))
+        rec_lev = int(round(rec_lev * float(rl_inf.get("leverage_mult", 1.0) or 1.0)))
+        if vol_pct > config.FUTURES_TARGET_VOL_PCT_HIGH:
+            rec_lev -= 1
+        if spread_pct > config.FUTURES_MAX_SPREAD_PCT * 0.7:
+            rec_lev -= 1
+        if confidence < config.FUTURES_MIN_CONFIDENCE + 0.07:
+            rec_lev = min(rec_lev, 2)
+        if self.consecutive_losses > 0:
+            rec_lev = min(rec_lev, 2)
+        rec_lev = max(min_lev, min(max_lev, rec_lev))
+
+        size_span = max(config.FUTURES_SIZE_MAX_MULT - config.FUTURES_SIZE_MIN_MULT, 0.01)
+        size_multiplier = config.FUTURES_SIZE_MIN_MULT + (score_span * size_span)
+        size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
+        if self.consecutive_losses >= 2:
+            size_multiplier *= 0.75
+        size_multiplier = max(config.FUTURES_SIZE_MIN_MULT, min(config.FUTURES_SIZE_MAX_MULT, size_multiplier))
+
+        verdict = (
+            f"Futures score={composite_score:.3f} "
+            f"(min={config.FUTURES_MIN_COMPOSITE_SCORE:.2f}) | "
+            f"conf={confidence:.2f} | lev={rec_lev}x | edge={expected_edge_pct:+.3f}% | "
+            f"RL:{rl_inf.get('profile_id')}/{rl_inf.get('decision_type')}"
+        )
+        return {
+            "allow": allow,
+            "composite_score": round(composite_score, 4),
+            "recommended_leverage": rec_lev,
+            "size_multiplier": round(size_multiplier, 4),
+            "rl_profile_id": rl_inf.get("profile_id", ""),
+            "rl_state_key": rl_inf.get("state_key", ""),
+            "rl_decision_type": rl_inf.get("decision_type", ""),
+            "verdict": verdict,
+            "component_scores": {
+                "vote_imbalance": round(vote_imbalance, 4),
+                "regime": round(regime_score, 4),
+                "momentum": round(momentum_score, 4),
+                "volatility": round(volatility_score, 4),
+                "liquidity": round(liquidity_score, 4),
+                "sentiment": round(sentiment_score, 4),
+                "session": round(session_score, 4),
+                "edge": round(edge_score, 4),
+                "confidence": round(confidence_score, 4),
+                "spread_pct": round(spread_pct, 4),
+                "volatility_pct": round(vol_pct, 4),
+                "sentiment_raw": round(sentiment_val, 4),
+                "articles_count": article_count,
+                "rl_q_value": round(float(rl_inf.get("q_value", 0.0) or 0.0), 6),
+            },
+            "penalties": penalties,
+            "hard_reject_reason": "",
+        }
+
+    def _options_policy_decision(
+        self,
+        symbol: str,
+        proposed_dir: str,
+        buy_count: int,
+        sell_count: int,
+        confidence: float,
+        expected_edge_pct: float,
+        regime_result: dict,
+        session_filt: dict,
+        vol_result: dict,
+        vol_prof: dict,
+        sentiment_snapshot: dict,
+        vel_result: dict,
+        macd_result: dict,
+        ema_result: dict,
+        ob_result: dict,
+        mode: str = None,
+        enforce_confidence_gate: bool = True,
+    ) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "OPTIONS":
+            return {
+                "allow": True,
+                "composite_score": 1.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "SPOT_FLOW",
+                "size_multiplier": 1.0,
+                "verdict": "Spot/futures mode active",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "",
+            }
+
+        is_long = proposed_dir == "LONG"
+        confidence = self._clamp(confidence)
+        regime = str(regime_result.get("regime", "UNKNOWN")).upper()
+        regime_strength = float(regime_result.get("strength", 0.0) or 0.0)
+        vol_pct = float(vol_result.get("volatility_pct", 0.0) or 0.0)
+        spread_pct = float(vol_prof.get("spread_pct", 0.0) or 0.0)
+        volume_24h = float(vol_prof.get("volume_24h", 0.0) or 0.0)
+        session_quality = str(session_filt.get("quality", "LOW")).upper()
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+
+        if spread_pct > config.OPTIONS_MAX_SPREAD_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "NO_TRADE",
+                "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Options reject: spread too wide {spread_pct:.3f}% > "
+                    f"{config.OPTIONS_MAX_SPREAD_PCT:.3f}%"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "wide_spread",
+            }
+
+        if volume_24h < config.OPTIONS_MIN_VOLUME_24H:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "NO_TRADE",
+                "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Options reject: low liquidity volume {volume_24h:.2f} < "
+                    f"{config.OPTIONS_MIN_VOLUME_24H:.2f}"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "low_liquidity",
+            }
+
+        if vol_pct > config.OPTIONS_EXTREME_VOL_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "NO_TRADE",
+                "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Options reject: extreme volatility {vol_pct:.3f}% > "
+                    f"{config.OPTIONS_EXTREME_VOL_PCT:.3f}%"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "extreme_volatility",
+            }
+
+        if regime in {"CHOPPY", "UNKNOWN"} and regime_strength < config.OPTIONS_MIN_REGIME_STRENGTH:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "NO_TRADE",
+                "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                "verdict": (
+                    f"Options reject: weak structure ({regime_strength:.2f} < "
+                    f"{config.OPTIONS_MIN_REGIME_STRENGTH:.2f})"
+                ),
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "weak_structure",
+            }
+
+        sentiment_score = 0.55
+        sentiment_val = 0.0
+        article_count = 0
+        if sentiment_snapshot:
+            sentiment_val = float(sentiment_snapshot.get("sentiment_score", 0.0) or 0.0)
+            comp = sentiment_snapshot.get("components", {}) or {}
+            article_count = int(comp.get("articles_count", 0) or 0)
+            directional_sentiment = sentiment_val if is_long else -sentiment_val
+            if article_count >= config.SENTIMENT_MIN_ARTICLES:
+                sentiment_score = self._clamp(0.5 + directional_sentiment)
+                if (
+                    config.OPTIONS_BLOCK_ON_OPPOSING_SENTIMENT
+                    and directional_sentiment < -config.SENTIMENT_DIRECTIONAL_FLOOR
+                ):
+                    return {
+                        "allow": False,
+                        "composite_score": 0.0,
+                        "recommended_leverage": 1,
+                        "recommended_strategy": "NO_TRADE",
+                        "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                        "verdict": (
+                            f"Options reject: sentiment opposes {proposed_dir} "
+                            f"({sentiment_val:+.2f}, articles={article_count})"
+                        ),
+                        "component_scores": {},
+                        "penalties": {},
+                        "hard_reject_reason": "sentiment_conflict",
+                    }
+
+        strategy = "WAIT"
+        strategy_fit = 0.55
+        strategy_note = "Mixed structure"
+        low_vol = max(config.OPTIONS_TARGET_VOL_PCT_LOW, 0.0001)
+        high_vol = max(config.OPTIONS_TARGET_VOL_PCT_HIGH, low_vol + 0.01)
+
+        if vol_pct >= high_vol and regime in {"CHOPPY", "NEUTRAL"} and vote_imbalance <= 0.35:
+            strategy = "IRON_CONDOR"
+            strategy_fit = 0.95
+            strategy_note = "High vol + range structure -> sell premium with wings"
+        elif vol_pct >= high_vol and regime in {"BULL", "BEAR"}:
+            strategy = "BULL_PUT_CREDIT_SPREAD" if is_long else "BEAR_CALL_CREDIT_SPREAD"
+            strategy_fit = 0.84
+            strategy_note = "Elevated vol + directional trend -> credit spread"
+        elif vol_pct <= low_vol and vote_imbalance >= 0.35 and regime in {"BULL", "BEAR", "NEUTRAL"}:
+            strategy = "CALL_DEBIT_SPREAD" if is_long else "PUT_DEBIT_SPREAD"
+            strategy_fit = 0.90
+            strategy_note = "Low vol + direction -> buy premium via debit spread"
+        elif vol_pct <= low_vol and vote_imbalance < 0.35:
+            strategy = "LONG_STRADDLE_PROXY"
+            strategy_fit = 0.76
+            strategy_note = "Low vol + weak direction -> breakout optionality"
+        else:
+            strategy = "DIRECTIONAL_DEBIT_SPREAD" if vote_imbalance >= 0.35 else "SKIP"
+            strategy_fit = 0.65 if vote_imbalance >= 0.35 else 0.42
+            strategy_note = "No strong vol edge"
+
+        if strategy == "SKIP":
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": strategy,
+                "size_multiplier": config.OPTIONS_SIZE_MIN_MULT,
+                "verdict": f"Options reject: {strategy_note}",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "weak_vol_edge",
+            }
+
+        momentum_dir = ((float(vel_result.get("velocity_1m", 0.0) or 0.0) * 0.7) + (float(vel_result.get("velocity_5m", 0.0) or 0.0) * 0.3))
+        momentum_score = self._clamp(0.5 + ((momentum_dir * (1 if is_long else -1)) / 0.30))
+        regime_score = self._clamp(regime_strength / max(config.OPTIONS_MIN_REGIME_STRENGTH * 2.5, 0.25))
+        liquidity_score = self._clamp(
+            ((volume_24h / max(config.OPTIONS_MIN_VOLUME_24H * 2.0, 1.0)) * 0.55)
+            + (((config.OPTIONS_MAX_SPREAD_PCT - spread_pct) / max(config.OPTIONS_MAX_SPREAD_PCT, 0.001)) * 0.45)
+        )
+        if vol_pct <= low_vol:
+            volatility_score = 0.92
+        elif vol_pct >= high_vol:
+            decay = (vol_pct - high_vol) / max(config.OPTIONS_EXTREME_VOL_PCT - high_vol, 0.01)
+            volatility_score = self._clamp(0.92 - (decay * 0.30))
+        else:
+            volatility_score = 0.45
+        session_map = {"PREMIUM": 1.0, "HIGH": 0.90, "MODERATE": 0.74, "LOW": 0.56}
+        session_score = session_map.get(session_quality, 0.60)
+        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.8, 0.25))
+        rl_inf = self._rl_infer(
+            mode="OPTIONS",
+            regime=regime,
+            session_quality=session_quality,
+            volatility_pct=vol_pct,
+            sentiment_score=sentiment_val,
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=expected_edge_pct,
+        )
+
+        weights = {
+            "vote_imbalance": max(0.0, float(config.OPTIONS_WEIGHT_VOTE_IMBALANCE)),
+            "regime": max(0.0, float(config.OPTIONS_WEIGHT_REGIME)),
+            "momentum": max(0.0, float(config.OPTIONS_WEIGHT_MOMENTUM)),
+            "volatility": max(0.0, float(config.OPTIONS_WEIGHT_VOLATILITY)),
+            "liquidity": max(0.0, float(config.OPTIONS_WEIGHT_LIQUIDITY)),
+            "sentiment": max(0.0, float(config.OPTIONS_WEIGHT_SENTIMENT)),
+            "session": max(0.0, float(config.OPTIONS_WEIGHT_SESSION)),
+            "edge": max(0.0, float(config.OPTIONS_WEIGHT_EDGE)),
+        }
+        weights = self._rl_apply_weight_multipliers(weights, rl_inf)
+        w_sum = sum(weights.values()) or 1.0
+        weighted_core = (
+            weights["vote_imbalance"] * vote_imbalance
+            + weights["regime"] * regime_score
+            + weights["momentum"] * momentum_score
+            + weights["volatility"] * volatility_score
+            + weights["liquidity"] * liquidity_score
+            + weights["sentiment"] * sentiment_score
+            + weights["session"] * session_score
+            + weights["edge"] * edge_score
+        ) / w_sum
+
+        confidence_score = self._clamp(confidence + float(rl_inf.get("confidence_bias", 0.0)))
+        composite_score = self._clamp((weighted_core * 0.78) + (strategy_fit * 0.14) + (confidence_score * 0.08))
+
+        penalties = {}
+        if session_quality == "LOW":
+            penalties["off_hours"] = config.OPTIONS_OFF_HOURS_PENALTY
+            composite_score -= config.OPTIONS_OFF_HOURS_PENALTY
+        if self.consecutive_losses > 0:
+            loss_penalty = min(0.30, self.consecutive_losses * config.OPTIONS_LOSS_STREAK_PENALTY)
+            penalties["loss_streak"] = loss_penalty
+            composite_score -= loss_penalty
+        composite_score = self._clamp(composite_score)
+
+        conf_gate = confidence >= config.OPTIONS_MIN_CONFIDENCE if enforce_confidence_gate else True
+        allow = composite_score >= config.OPTIONS_MIN_COMPOSITE_SCORE and conf_gate
+        score_span = self._clamp(
+            (composite_score - config.OPTIONS_MIN_COMPOSITE_SCORE)
+            / max(1.0 - config.OPTIONS_MIN_COMPOSITE_SCORE, 0.001)
+        )
+        size_span = max(config.OPTIONS_SIZE_MAX_MULT - config.OPTIONS_SIZE_MIN_MULT, 0.01)
+        size_multiplier = config.OPTIONS_SIZE_MIN_MULT + (score_span * size_span)
+        size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
+        if self.consecutive_losses >= 2:
+            size_multiplier *= 0.75
+        size_multiplier = max(config.OPTIONS_SIZE_MIN_MULT, min(config.OPTIONS_SIZE_MAX_MULT, size_multiplier))
+
+        verdict = (
+            f"Options score={composite_score:.3f} (min={config.OPTIONS_MIN_COMPOSITE_SCORE:.2f}) | "
+            f"conf={confidence:.2f} | strat={strategy} | {strategy_note} | "
+            f"RL:{rl_inf.get('profile_id')}/{rl_inf.get('decision_type')}"
+        )
+        return {
+            "allow": allow,
+            "composite_score": round(composite_score, 4),
+            "recommended_leverage": 1,
+            "recommended_strategy": strategy,
+            "size_multiplier": round(size_multiplier, 4),
+            "rl_profile_id": rl_inf.get("profile_id", ""),
+            "rl_state_key": rl_inf.get("state_key", ""),
+            "rl_decision_type": rl_inf.get("decision_type", ""),
+            "verdict": verdict,
+            "component_scores": {
+                "vote_imbalance": round(vote_imbalance, 4),
+                "regime": round(regime_score, 4),
+                "momentum": round(momentum_score, 4),
+                "volatility": round(volatility_score, 4),
+                "liquidity": round(liquidity_score, 4),
+                "sentiment": round(sentiment_score, 4),
+                "session": round(session_score, 4),
+                "edge": round(edge_score, 4),
+                "strategy_fit": round(strategy_fit, 4),
+                "confidence": round(confidence_score, 4),
+                "spread_pct": round(spread_pct, 4),
+                "volatility_pct": round(vol_pct, 4),
+                "sentiment_raw": round(sentiment_val, 4),
+                "articles_count": article_count,
+                "rl_q_value": round(float(rl_inf.get("q_value", 0.0) or 0.0), 6),
+            },
+            "penalties": penalties,
+            "hard_reject_reason": "",
+        }
+
+    def _spot_policy_decision(
+        self,
+        symbol: str,
+        proposed_dir: str,
+        buy_count: int,
+        sell_count: int,
+        confidence: float,
+        expected_edge_pct: float,
+        regime_result: dict,
+        session_filt: dict,
+        vol_result: dict,
+        vol_prof: dict,
+        sentiment_snapshot: dict,
+        vel_result: dict,
+        macd_result: dict,
+        ema_result: dict,
+        ob_result: dict,
+        mode: str = None,
+        enforce_confidence_gate: bool = True,
+    ) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "SPOT":
+            return {
+                "allow": True,
+                "composite_score": 1.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "NON_SPOT_MODE",
+                "size_multiplier": 1.0,
+                "verdict": "Non-spot mode active",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "",
+            }
+
+        if config.SPOT_LONG_ONLY and proposed_dir != "LONG":
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "SPOT_LONG_ONLY_SKIP",
+                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                "verdict": "Spot reject: long-only mode blocks SHORT entries",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "long_only",
+            }
+
+        confidence = self._clamp(confidence)
+        regime = str(regime_result.get("regime", "UNKNOWN")).upper()
+        regime_strength = float(regime_result.get("strength", 0.0) or 0.0)
+        vol_pct = float(vol_result.get("volatility_pct", 0.0) or 0.0)
+        spread_pct = float(vol_prof.get("spread_pct", 0.0) or 0.0)
+        volume_24h = float(vol_prof.get("volume_24h", 0.0) or 0.0)
+        session_quality = str(session_filt.get("quality", "LOW")).upper()
+        vote_imbalance = self._clamp(abs(buy_count - sell_count) / 8.0)
+
+        if spread_pct > config.SPOT_MAX_SPREAD_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "SPOT_SKIP",
+                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                "verdict": f"Spot reject: spread too wide {spread_pct:.3f}% > {config.SPOT_MAX_SPREAD_PCT:.3f}%",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "wide_spread",
+            }
+        if volume_24h < config.SPOT_MIN_VOLUME_24H:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "SPOT_SKIP",
+                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                "verdict": f"Spot reject: low liquidity volume {volume_24h:.2f} < {config.SPOT_MIN_VOLUME_24H:.2f}",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "low_liquidity",
+            }
+        if vol_pct > config.SPOT_EXTREME_VOL_PCT:
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": "SPOT_SKIP",
+                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                "verdict": f"Spot reject: extreme volatility {vol_pct:.3f}% > {config.SPOT_EXTREME_VOL_PCT:.3f}%",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "extreme_volatility",
+            }
+
+        sentiment_val = 0.0
+        sentiment_score = 0.55
+        article_count = 0
+        if sentiment_snapshot:
+            sentiment_val = float(sentiment_snapshot.get("sentiment_score", 0.0) or 0.0)
+            comp = sentiment_snapshot.get("components", {}) or {}
+            article_count = int(comp.get("articles_count", 0) or 0)
+            if article_count >= config.SENTIMENT_MIN_ARTICLES:
+                directional_sentiment = sentiment_val if proposed_dir == "LONG" else -sentiment_val
+                sentiment_score = self._clamp(0.5 + directional_sentiment)
+                if (
+                    config.SPOT_BLOCK_ON_OPPOSING_SENTIMENT
+                    and directional_sentiment < -config.SENTIMENT_DIRECTIONAL_FLOOR
+                ):
+                    return {
+                        "allow": False,
+                        "composite_score": 0.0,
+                        "recommended_leverage": 1,
+                        "recommended_strategy": "SPOT_SKIP",
+                        "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                        "verdict": (
+                            f"Spot reject: sentiment opposes {proposed_dir} "
+                            f"({sentiment_val:+.2f}, articles={article_count})"
+                        ),
+                        "component_scores": {},
+                        "penalties": {},
+                        "hard_reject_reason": "sentiment_conflict",
+                    }
+
+        regime_alignment = 0.4
+        if regime == "BULL":
+            regime_alignment = 1.0 if proposed_dir == "LONG" else 0.15
+        elif regime == "BEAR":
+            regime_alignment = 0.20 if proposed_dir == "LONG" else 1.0
+        elif regime == "NEUTRAL":
+            regime_alignment = 0.62
+        elif regime == "CHOPPY":
+            regime_alignment = 0.35
+        trend_strength_score = self._clamp(regime_strength / max(config.SPOT_MIN_REGIME_STRENGTH * 3.0, 0.30))
+        trend_score = self._clamp((regime_alignment * 0.62) + (trend_strength_score * 0.38))
+
+        vel_1m = float(vel_result.get("velocity_1m", 0.0) or 0.0)
+        vel_5m = float(vel_result.get("velocity_5m", 0.0) or 0.0)
+        directional_vel = ((vel_1m * 0.7) + (vel_5m * 0.3)) * (1 if proposed_dir == "LONG" else -1)
+        vel_score = self._clamp(0.5 + (directional_vel / 0.25))
+
+        macd_signal = str(macd_result.get("crossover", "")).upper()
+        if proposed_dir == "LONG":
+            macd_score = 1.0 if "BULLISH_CROSS" in macd_signal else (0.82 if "BULL" in macd_signal else 0.28)
+        else:
+            macd_score = 1.0 if "BEARISH_CROSS" in macd_signal else (0.82 if "BEAR" in macd_signal else 0.28)
+
+        ema_signal = str(ema_result.get("signal", "")).upper()
+        if proposed_dir == "LONG":
+            ema_score = 1.0 if ema_signal == "STRONG_BUY" else (0.82 if ema_signal == "BUY" else 0.30)
+        else:
+            ema_score = 1.0 if ema_signal == "STRONG_SELL" else (0.82 if ema_signal == "SELL" else 0.30)
+
+        ob_bias = float(ob_result.get("bias", 0.0) or 0.0)
+        directional_ob = ob_bias * (1 if proposed_dir == "LONG" else -1)
+        ob_score = self._clamp(0.5 + (directional_ob / 0.12))
+        momentum_score = self._clamp((vel_score * 0.40) + (macd_score * 0.30) + (ema_score * 0.20) + (ob_score * 0.10))
+
+        low_vol = max(config.SPOT_TARGET_VOL_PCT_LOW, 0.0001)
+        high_vol = max(config.SPOT_TARGET_VOL_PCT_HIGH, low_vol + 0.01)
+        if vol_pct < low_vol:
+            volatility_score = self._clamp(0.65 + ((vol_pct / low_vol) * 0.25))
+        elif vol_pct <= high_vol:
+            volatility_score = 1.0
+        else:
+            decay = (vol_pct - high_vol) / max(config.SPOT_EXTREME_VOL_PCT - high_vol, 0.01)
+            volatility_score = self._clamp(1.0 - decay)
+
+        volume_score = self._clamp(volume_24h / max(config.SPOT_MIN_VOLUME_24H * 2.0, 1.0))
+        spread_score = self._clamp((config.SPOT_MAX_SPREAD_PCT - spread_pct) / max(config.SPOT_MAX_SPREAD_PCT, 0.001))
+        liquidity_score = self._clamp((volume_score * 0.55) + (spread_score * 0.45))
+
+        session_map = {"PREMIUM": 1.0, "HIGH": 0.90, "MODERATE": 0.76, "LOW": 0.58}
+        session_score = session_map.get(session_quality, 0.62)
+
+        session_stats = self.session_tracker.get_stats()
+        win_rate_score = 0.50
+        wr_text = str(session_stats.get("win_rate", "N/A"))
+        if wr_text.endswith("%"):
+            try:
+                win_rate_score = self._clamp(0.5 + ((float(wr_text[:-1]) - 50.0) / 100.0))
+            except Exception:
+                win_rate_score = 0.50
+        performance_score = self._clamp(win_rate_score - (self.consecutive_losses * 0.12))
+        rl_inf = self._rl_infer(
+            mode="SPOT",
+            regime=regime,
+            session_quality=session_quality,
+            volatility_pct=vol_pct,
+            sentiment_score=sentiment_val,
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=expected_edge_pct,
+        )
+
+        strategy = "SPOT_SELECTIVE_BUY"
+        strategy_fit = 0.70
+        strategy_note = "Selective long setup"
+        if regime == "BULL" and vote_imbalance >= 0.35 and momentum_score >= 0.62:
+            strategy = "SPOT_TREND_PULLBACK_BUY"
+            strategy_fit = 0.92
+            strategy_note = "Bull regime continuation"
+        elif regime == "NEUTRAL" and vote_imbalance >= 0.45 and momentum_score >= 0.60 and vol_pct <= high_vol:
+            strategy = "SPOT_BREAKOUT_BUY"
+            strategy_fit = 0.84
+            strategy_note = "Neutral-to-breakout impulse"
+        elif regime == "BEAR" and sentiment_val > 0.20 and vol_pct <= high_vol * 0.8 and confidence >= config.SPOT_MIN_CONFIDENCE + 0.06:
+            strategy = "SPOT_MEAN_REVERSION_SCALP"
+            strategy_fit = 0.68
+            strategy_note = "Bear regime contrarian scalp (small size)"
+        elif regime == "CHOPPY":
+            strategy = "SPOT_SKIP_CHOP"
+            strategy_fit = 0.34
+            strategy_note = "Choppy regime"
+
+        if strategy == "SPOT_SKIP_CHOP":
+            return {
+                "allow": False,
+                "composite_score": 0.0,
+                "recommended_leverage": 1,
+                "recommended_strategy": strategy,
+                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
+                "verdict": f"Spot reject: {strategy_note}",
+                "component_scores": {},
+                "penalties": {},
+                "hard_reject_reason": "choppy_regime",
+            }
+
+        weights = {
+            "trend": max(0.0, float(config.SPOT_WEIGHT_TREND)),
+            "momentum": max(0.0, float(config.SPOT_WEIGHT_MOMENTUM)),
+            "volatility": max(0.0, float(config.SPOT_WEIGHT_VOLATILITY)),
+            "liquidity": max(0.0, float(config.SPOT_WEIGHT_LIQUIDITY)),
+            "sentiment": max(0.0, float(config.SPOT_WEIGHT_SENTIMENT)),
+            "session": max(0.0, float(config.SPOT_WEIGHT_SESSION)),
+            "performance": max(0.0, float(config.SPOT_WEIGHT_PERFORMANCE)),
+        }
+        weights = self._rl_apply_weight_multipliers(weights, rl_inf)
+        w_sum = sum(weights.values()) or 1.0
+        weighted_core = (
+            weights["trend"] * trend_score
+            + weights["momentum"] * momentum_score
+            + weights["volatility"] * volatility_score
+            + weights["liquidity"] * liquidity_score
+            + weights["sentiment"] * sentiment_score
+            + weights["session"] * session_score
+            + weights["performance"] * performance_score
+        ) / w_sum
+
+        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.5, 0.25))
+        confidence_score = self._clamp(confidence + float(rl_inf.get("confidence_bias", 0.0)))
+        composite_score = self._clamp((weighted_core * 0.80) + (strategy_fit * 0.10) + (edge_score * 0.05) + (confidence_score * 0.05))
+
+        penalties = {}
+        if session_quality == "LOW":
+            penalties["off_hours"] = config.SPOT_OFF_HOURS_PENALTY
+            composite_score -= config.SPOT_OFF_HOURS_PENALTY
+        if self.consecutive_losses > 0:
+            loss_penalty = min(0.20, self.consecutive_losses * config.SPOT_LOSS_STREAK_PENALTY)
+            penalties["loss_streak"] = loss_penalty
+            composite_score -= loss_penalty
+        composite_score = self._clamp(composite_score)
+
+        conf_gate = confidence >= config.SPOT_MIN_CONFIDENCE if enforce_confidence_gate else True
+        allow = composite_score >= config.SPOT_MIN_COMPOSITE_SCORE and conf_gate
+        score_span = self._clamp(
+            (composite_score - config.SPOT_MIN_COMPOSITE_SCORE)
+            / max(1.0 - config.SPOT_MIN_COMPOSITE_SCORE, 0.001)
+        )
+        size_span = max(config.SPOT_SIZE_MAX_MULT - config.SPOT_SIZE_MIN_MULT, 0.01)
+        size_multiplier = config.SPOT_SIZE_MIN_MULT + (score_span * size_span)
+        size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
+        if strategy == "SPOT_MEAN_REVERSION_SCALP":
+            size_multiplier = min(size_multiplier, 0.80)
+        if self.consecutive_losses >= 2:
+            size_multiplier *= 0.75
+        size_multiplier = max(config.SPOT_SIZE_MIN_MULT, min(config.SPOT_SIZE_MAX_MULT, size_multiplier))
+
+        verdict = (
+            f"Spot score={composite_score:.3f} (min={config.SPOT_MIN_COMPOSITE_SCORE:.2f}) | "
+            f"conf={confidence:.2f} | strat={strategy} | {strategy_note} | "
+            f"RL:{rl_inf.get('profile_id')}/{rl_inf.get('decision_type')}"
+        )
+        return {
+            "allow": allow,
+            "composite_score": round(composite_score, 4),
+            "recommended_leverage": 1,
+            "recommended_strategy": strategy,
+            "size_multiplier": round(size_multiplier, 4),
+            "rl_profile_id": rl_inf.get("profile_id", ""),
+            "rl_state_key": rl_inf.get("state_key", ""),
+            "rl_decision_type": rl_inf.get("decision_type", ""),
+            "verdict": verdict,
+            "component_scores": {
+                "trend": round(trend_score, 4),
+                "vote_imbalance": round(vote_imbalance, 4),
+                "regime_strength": round(trend_strength_score, 4),
+                "momentum": round(momentum_score, 4),
+                "volatility": round(volatility_score, 4),
+                "liquidity": round(liquidity_score, 4),
+                "sentiment": round(sentiment_score, 4),
+                "session": round(session_score, 4),
+                "performance": round(performance_score, 4),
+                "strategy_fit": round(strategy_fit, 4),
+                "edge": round(edge_score, 4),
+                "confidence": round(confidence_score, 4),
+                "spread_pct": round(spread_pct, 4),
+                "volatility_pct": round(vol_pct, 4),
+                "sentiment_raw": round(sentiment_val, 4),
+                "articles_count": article_count,
+                "rl_q_value": round(float(rl_inf.get("q_value", 0.0) or 0.0), 6),
+            },
+            "penalties": penalties,
+            "hard_reject_reason": "",
+        }
+
+    def _product_policy_decision(self, mode: str = None, **kwargs) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode == "FUTURES":
+            return self._futures_policy_decision(mode=active_mode, **kwargs)
+        if active_mode == "OPTIONS":
+            return self._options_policy_decision(mode=active_mode, **kwargs)
+        return self._spot_policy_decision(mode=active_mode, **kwargs)
+
+    def _log_futures_eval(self, symbol: str, stage: str, eval_result: dict, mode: str = None):
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "FUTURES":
+            return
+        comps = eval_result.get("component_scores") or {}
+        penalties = eval_result.get("penalties") or {}
+        logger.info(
+            "FUTURES_EVAL stage=%s symbol=%s allow=%s score=%.3f lev=%sx verdict=%s components=%s penalties=%s",
+            stage,
+            symbol,
+            eval_result.get("allow"),
+            float(eval_result.get("composite_score", 0.0) or 0.0),
+            int(eval_result.get("recommended_leverage", 1) or 1),
+            eval_result.get("verdict", ""),
+            comps,
+            penalties,
+        )
+
+    def _log_options_eval(self, symbol: str, stage: str, eval_result: dict, mode: str = None):
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "OPTIONS":
+            return
+        comps = eval_result.get("component_scores") or {}
+        penalties = eval_result.get("penalties") or {}
+        logger.info(
+            "OPTIONS_EVAL stage=%s symbol=%s allow=%s score=%.3f strategy=%s verdict=%s components=%s penalties=%s",
+            stage,
+            symbol,
+            eval_result.get("allow"),
+            float(eval_result.get("composite_score", 0.0) or 0.0),
+            eval_result.get("recommended_strategy", "N/A"),
+            eval_result.get("verdict", ""),
+            comps,
+            penalties,
+        )
+
+    def _log_spot_eval(self, symbol: str, stage: str, eval_result: dict, mode: str = None):
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode != "SPOT":
+            return
+        comps = eval_result.get("component_scores") or {}
+        penalties = eval_result.get("penalties") or {}
+        logger.info(
+            "SPOT_EVAL stage=%s symbol=%s allow=%s score=%.3f strategy=%s verdict=%s components=%s penalties=%s",
+            stage,
+            symbol,
+            eval_result.get("allow"),
+            float(eval_result.get("composite_score", 0.0) or 0.0),
+            eval_result.get("recommended_strategy", "N/A"),
+            eval_result.get("verdict", ""),
+            comps,
+            penalties,
+        )
+
+    def _log_product_eval(self, symbol: str, stage: str, eval_result: dict, mode: str = None):
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode == "FUTURES":
+            self._log_futures_eval(symbol, stage, eval_result, mode=active_mode)
+        elif active_mode == "OPTIONS":
+            self._log_options_eval(symbol, stage, eval_result, mode=active_mode)
+        elif active_mode == "SPOT":
+            self._log_spot_eval(symbol, stage, eval_result, mode=active_mode)
+
+    def _evaluate_product_policies_parallel(self, symbol: str, stage: str, **kwargs) -> dict:
+        products = (
+            list(self.parallel_products)
+            if self.enable_parallel_products
+            else [str(config.TRADING_PRODUCT).upper()]
+        )
+        products = [p for p in products if p in {"SPOT", "FUTURES", "OPTIONS"}]
+        if not products:
+            products = [str(config.TRADING_PRODUCT).upper()]
+
+        results = {}
+        if len(products) == 1:
+            mode = products[0]
+            result = self._product_policy_decision(mode=mode, **kwargs)
+            result = self._attach_rl_metadata(mode, result, kwargs)
+            self._log_product_eval(symbol, stage, result, mode=mode)
+            results[mode] = result
+            return results
+
+        futures_map = {}
+        for mode in products:
+            fut = self.policy_executor.submit(self._product_policy_decision, mode=mode, **kwargs)
+            futures_map[fut] = mode
+
+        for fut in as_completed(futures_map):
+            mode = futures_map[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                logger.error("Policy evaluation failed mode=%s symbol=%s stage=%s err=%s", mode, symbol, stage, e, exc_info=True)
+                result = {
+                    "allow": False,
+                    "composite_score": 0.0,
+                    "recommended_leverage": 1,
+                    "recommended_strategy": "ERROR",
+                    "size_multiplier": 1.0,
+                    "verdict": f"{mode} policy failed: {e}",
+                    "component_scores": {},
+                    "penalties": {},
+                    "hard_reject_reason": "policy_error",
+                }
+            result = self._attach_rl_metadata(mode, result, kwargs)
+            self._log_product_eval(symbol, stage, result, mode=mode)
+            results[mode] = result
+        return results
+
     def _check_kill_switch(self) -> tuple:
         drawdown = max(0.0, self.session_start_balance - self.simulator.balance_usdt)
         if drawdown >= config.MAX_DAILY_DRAWDOWN_USD:
@@ -359,17 +1409,20 @@ class TradingEngine:
 
         return False, ""
 
-    async def _close_trade(self, symbol, current_price, reason):
+    async def _close_trade(self, symbol, current_price, reason, mode: str = None):
         """Helper to close a position and run retrospective."""
-        trade_result = self.simulator.exit_position(symbol, current_price, reason)
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        pos_key = self._pos_key(symbol, active_mode)
+        pos_ctx = dict(self.simulator.positions.get(pos_key, {}) or {})
+        trade_result = self.simulator.exit_position(symbol, current_price, reason, mode=active_mode)
         if trade_result:
             self.total_session_pnl += trade_result["pnl"]
             self.trades_closed += 1
             self.session_tracker.record_trade(trade_result["pnl"])
-            self.last_close_time = datetime.now()  # Fix 5: record close time for cooldown
+            self.last_close_time_by_mode[active_mode] = datetime.now()  # Fix 5: record close time for cooldown
 
             # ── Record for duplicate-entry guard ──
-            self.last_entry_prices[symbol] = (
+            self.last_entry_prices[pos_key] = (
                 trade_result["entry_price"], trade_result["side"], datetime.now()
             )
 
@@ -377,24 +1430,72 @@ class TradingEngine:
             if trade_result["pnl"] <= 0:
                 self.consecutive_losses += 1
                 side = trade_result["side"]
-                block_key = f"{symbol}_{side}"
+                block_key = f"{pos_key}_{side}"
                 self._loss_streak = getattr(self, '_loss_streak', {})
                 self._loss_streak[block_key] = self._loss_streak.get(block_key, 0) + 1
                 if self._loss_streak[block_key] >= 2:
                     block_until = datetime.now() + timedelta(seconds=600)  # 10 min block
-                    self.direction_block[symbol] = {"side": side, "blocked_until": block_until}
+                    self.direction_block[pos_key] = {"side": side, "blocked_until": block_until}
                     logger.warning(f"🚫 DIRECTION BLOCK: {side} on {symbol} for 10 min after {self._loss_streak[block_key]} consecutive losses")
                     self._loss_streak[block_key] = 0  # reset after block
             else:
                 self.consecutive_losses = 0
                 # Win — reset the loss streak for this symbol's direction
                 side = trade_result["side"]
-                block_key = f"{symbol}_{side}"
+                block_key = f"{pos_key}_{side}"
                 self._loss_streak = getattr(self, '_loss_streak', {})
                 self._loss_streak[block_key] = 0
                 # Clear any direction block if we just won
-                if self.direction_block.get(symbol, {}).get("side") == side:
-                    self.direction_block.pop(symbol, None)
+                if self.direction_block.get(pos_key, {}).get("side") == side:
+                    self.direction_block.pop(pos_key, None)
+
+            # ── RL reward update (profit/loss + opportunity cost penalty) ──
+            rl_ctx = (pos_ctx.get("rl_context") or self._pending_rl_by_symbol.get(pos_key) or {})
+            rl_mode = str(rl_ctx.get("mode", "") or "")
+            rl_state_key = str(rl_ctx.get("state_key", "") or "")
+            rl_profile_id = str(rl_ctx.get("profile_id", "") or "")
+            if rl_mode and rl_state_key and rl_profile_id:
+                notional = float(
+                    rl_ctx.get("entry_notional_usdt")
+                    or pos_ctx.get("original_pos_usdt")
+                    or ((pos_ctx.get("quantity", 0.0) or 0.0) * (pos_ctx.get("entry_price", 0.0) or 0.0))
+                    or 1.0
+                )
+                notional = max(1.0, notional)
+                pnl_usd = float(trade_result.get("pnl", 0.0) or 0.0)
+                pnl_reward = pnl_usd / notional
+                hold_secs = float(trade_result.get("hold_secs", 0) or 0)
+                raw_opp_cost_penalty = float(config.RL_OPEN_TRADE_COST_PENALTY) * max(1.5, hold_secs / 180.0)
+                opp_cap = self._rl_loss_penalty_cap(pnl_reward)
+                opp_cost_penalty = min(raw_opp_cost_penalty, opp_cap)
+                reward = pnl_reward - opp_cost_penalty
+                self.rl_agent.update(rl_mode, rl_state_key, rl_profile_id, reward)
+                save_rl_event(
+                    mode=rl_mode,
+                    profile_id=rl_profile_id,
+                    state_key=rl_state_key,
+                    event_type="TRADE_CLOSE_REWARD",
+                    reason=trade_result.get("entry_reason"),
+                    symbol=symbol,
+                    reward=reward,
+                    penalty=opp_cost_penalty,
+                    raw_penalty=raw_opp_cost_penalty,
+                    pnl_reward=pnl_reward,
+                    hold_secs=hold_secs,
+                )
+                logger.info(
+                    "RL_TRADE_REWARD mode=%s profile=%s pnl=%.4f notional=%.2f hold_secs=%s pnl_reward=%.6f raw_opp=%.6f cap=%.6f reward=%.6f",
+                    rl_mode,
+                    rl_profile_id,
+                    pnl_usd,
+                    notional,
+                    int(hold_secs),
+                    pnl_reward,
+                    raw_opp_cost_penalty,
+                    opp_cap,
+                    reward,
+                )
+            self._pending_rl_by_symbol.pop(pos_key, None)
 
             if self.retro_agent:
                 try:
@@ -524,11 +1625,17 @@ class TradingEngine:
                 logger.error(f"Periodic review loop error: {e}", exc_info=True)
                 await asyncio.sleep(30)   # short backoff, then retry
 
-    async def run_loop(self):
-        logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max)...")
+    async def run_loop(self, mode: str = None):
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        if active_mode not in {"SPOT", "FUTURES", "OPTIONS"}:
+            active_mode = "SPOT"
+        self.skipped_cycles_by_mode.setdefault(active_mode, 0)
+        def intent(message, targets):
+            update_intent(message, targets, mode=active_mode)
+        logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max) mode={active_mode}...")
         primary_symbol = sorted(self.allowed_symbols)[0]
         
-        # ── v7 Warmup: Fetch 1m historical klines to skip 35min wait ──
+        # ── Warmup: fetch historical klines to reduce startup wait ──
         for symbol in sorted(self.allowed_symbols):
             klines = self.client.get_historical_klines(symbol, interval='1m', limit=60)
             if klines:
@@ -550,10 +1657,10 @@ class TradingEngine:
                             )
                         self.price_history[symbol].append(price)
 
-                min_ticks = 35  # Enough for MACD (26 periods + 9 signal)
+                min_ticks = max(5, int(config.WARMUP_MIN_TICKS))
                 ticks_ready = len(self.price_history.get(primary_symbol, [])) if self.price_history else 0
                 if ticks_ready < min_ticks:
-                    update_intent(f"Warming up... ({ticks_ready}/{min_ticks} ticks)", [])
+                    intent(f"Warming up... ({ticks_ready}/{min_ticks} ticks)", [])
                     await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
                     continue
 
@@ -563,13 +1670,16 @@ class TradingEngine:
                 if kill and not self.trading_halted_reason:
                     self.trading_halted_reason = reason
                     logger.error(reason)
-                    update_intent(f"🛑 {reason}", [])
+                    intent(f"🛑 {reason}", [])
 
                 # ── 1. Manage open positions ──────────────────────────────────
-                for symbol in list(self.simulator.positions.keys()):
-                    if symbol not in prices: continue
+                for pos_key, pos in list(self.simulator.positions.items()):
+                    if str(pos.get("mode", "")).upper() != active_mode:
+                        continue
+                    symbol = pos.get("symbol")
+                    if not symbol or symbol not in prices:
+                        continue
 
-                    pos = self.simulator.positions[symbol]
                     current_price = prices[symbol]
                     hold_secs = (datetime.now() - pos["entry_time"]).seconds
                     entry = pos["entry_price"]
@@ -580,7 +1690,7 @@ class TradingEngine:
                         pnl_pct = (entry - current_price) / entry
 
                     if self.trading_halted_reason:
-                        await self._close_trade(symbol, current_price, f"🛑 Kill-switch exit: {self.trading_halted_reason}")
+                        await self._close_trade(symbol, current_price, f"🛑 Kill-switch exit: {self.trading_halted_reason}", mode=active_mode)
                         continue
 
                     # Per-position dynamic SL/TP (set at entry from ATR, fallback to config)
@@ -614,10 +1724,17 @@ class TradingEngine:
                                 add_usdt = int(pos.get("original_pos_usdt", 125) * 0.5)
                                 add_usdt = min(add_usdt, int(self.simulator.balance_usdt * 0.15))
                                 if add_usdt >= 60:
-                                    self.simulator.enter_position(symbol, current_price, add_usdt,
-                                                                   f"🔺 Pyramid #{pyramid_count+1}", side=pos["side"])
-                                    pos["pyramid_count"] = pyramid_count + 1
-                                    logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ${add_usdt:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
+                                    added = self.simulator.add_to_position(
+                                        symbol,
+                                        current_price,
+                                        add_usdt,
+                                        f"🔺 Pyramid #{pyramid_count + 1}",
+                                        mode=active_mode,
+                                    )
+                                    if added:
+                                        pos["pyramid_count"] = pyramid_count + 1
+                                        pos["original_pos_usdt"] = int(pos.get("original_pos_usdt", 125) + add_usdt)
+                                        logger.info(f"🔺 PYRAMID #{pyramid_count+1}: Added ${add_usdt:,} to {pos['side']} {symbol} at {pnl_pct*100:+.2f}%")
 
                     # ── Fix 3: MINIMUM HOLD TIME (300s) ────────────────────
                     # Allow 1m candles enough time to breathe. Force 5m minimum.
@@ -625,37 +1742,50 @@ class TradingEngine:
 
                     # ── TAKE PROFIT ──
                     if min_hold_met and pnl_pct >= tp_pct:
-                        await self._close_trade(symbol, current_price, f"✅ Take-Profit ({pnl_pct*100:+.3f}%)")
+                        await self._close_trade(symbol, current_price, f"✅ Take-Profit ({pnl_pct*100:+.3f}%)", mode=active_mode)
                         continue
 
                     # ── TRAILING STOP ──
                     if min_hold_met and pos["trailing_active"]:
                         trail_stop = pos["peak_pnl_pct"] - config.TRAILING_STOP_OFFSET_PCT
                         if pnl_pct < trail_stop:
-                            await self._close_trade(symbol, current_price, f"📉 Trailing Stop (peak: {pos['peak_pnl_pct']*100:+.3f}% → now: {pnl_pct*100:+.3f}%)")
+                            await self._close_trade(
+                                symbol,
+                                current_price,
+                                f"📉 Trailing Stop (peak: {pos['peak_pnl_pct']*100:+.3f}% → now: {pnl_pct*100:+.3f}%)",
+                                mode=active_mode,
+                            )
                             continue
 
                     # ── EARLY STOP-LOSS ──
                     if min_hold_met and pnl_pct < -sl_pct:
-                        await self._close_trade(symbol, current_price, f"⛔ Stop-Loss ({pnl_pct*100:.3f}%)")
+                        await self._close_trade(symbol, current_price, f"⛔ Stop-Loss ({pnl_pct*100:.3f}%)", mode=active_mode)
                         continue
 
                     # ── TIME EXIT (always applies, ignores min hold) ──
                     if hold_secs >= config.MANDATORY_EXIT_SECONDS:
-                        await self._close_trade(symbol, current_price, f"⏰ Time Exit ({config.MANDATORY_EXIT_SECONDS}s)")
+                        await self._close_trade(symbol, current_price, f"⏰ Time Exit ({config.MANDATORY_EXIT_SECONDS}s)", mode=active_mode)
                         continue
 
                     remaining = config.MANDATORY_EXIT_SECONDS - hold_secs
                     trailing_label = " | 🔔 TRAILING" if pos["trailing_active"] else ""
-                    update_intent(
-                        f"Holding {pos['side']} {symbol} | PnL: {pnl_pct*100:+.3f}% (SL:{sl_pct*100:.2f}%/TP:{tp_pct*100:.2f}%) | {remaining}s{trailing_label}",
+                    pos_mode = str(pos.get("selected_product", active_mode)).upper()
+                    leverage_label = ""
+                    if pos_mode == "FUTURES":
+                        leverage_label = f" | Lev:{int(pos.get('recommended_leverage', 1))}x"
+                    elif pos_mode == "OPTIONS":
+                        leverage_label = f" | Strat:{pos.get('options_strategy', 'N/A')}"
+                    elif pos_mode == "SPOT":
+                        leverage_label = f" | Strat:{pos.get('spot_strategy', 'SPOT_FLOW')}"
+                    intent(
+                        f"Holding {pos['side']} {symbol} | PnL: {pnl_pct*100:+.3f}% (SL:{sl_pct*100:.2f}%/TP:{tp_pct*100:.2f}%) | {remaining}s{trailing_label}{leverage_label}",
                         [symbol]
                     )
 
                 # ── 2. Enter new positions ────────────────────────────────────
-                if len(self.simulator.positions) == 0 and self.trades_closed < config.MAX_TRADES_RUN:
+                if len(self._positions_for_mode(active_mode)) == 0 and self.trades_closed < config.MAX_TRADES_RUN:
                     if self.trading_halted_reason:
-                        update_intent(f"🛑 Trading halted: {self.trading_halted_reason}", [])
+                        intent(f"🛑 Trading halted: {self.trading_halted_reason}", [])
                         break
 
                     for symbol in sorted(self.allowed_symbols):
@@ -680,9 +1810,9 @@ class TradingEngine:
 
                         # Dead market filter
                         if not vol_result["tradeable"] and not vol_prof.get("liquid", False):
-                            self.skipped_cycles += 1
-                            if self.skipped_cycles % 12 == 1:
-                                update_intent(f"⏳ Market dead (vol: {vol_result['volatility_pct']:.4f}%). Skipped {self.skipped_cycles}x", [symbol])
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            if self.skipped_cycles_by_mode[active_mode] % 12 == 1:
+                                intent(f"⏳ Market dead (vol: {vol_result['volatility_pct']:.4f}%). Skipped {self.skipped_cycles_by_mode[active_mode]}x", [symbol])
                             continue
 
                         # ── v6: SESSION TIME FILTER ────────────────────────
@@ -740,17 +1870,18 @@ class TradingEngine:
 
                         # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
                         if buy_count < min_pro_needed and sell_count < min_pro_needed:
-                            self.skipped_cycles += 1
+                            self.skipped_cycles_by_mode[active_mode] += 1
                             best = max(buy_count, sell_count)
-                            if self.skipped_cycles % 6 == 1:
-                                update_intent(
+                            if self.skipped_cycles_by_mode[active_mode] % 6 == 1:
+                                intent(
                                     f"⏳ Waiting for setup ({best}/{min_pro_needed} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
                                     [symbol]
                                 )
-                            if self.skipped_cycles % 3 == 0:
+                            if self.skipped_cycles_by_mode[active_mode] % 3 == 0:
                                 save_signal_event(symbol, current_price, buy_count, sell_count,
                                                   rsi_result['rsi'], macd_result['crossover'],
-                                                  bb_result['position_pct'], 'SKIPPED')
+                                                  bb_result['position_pct'], 'SKIPPED',
+                                                  decision_source=self._mode_decision_source(active_mode, "SETUP_WAIT"))
                             continue
 
                         # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
@@ -760,34 +1891,9 @@ class TradingEngine:
                         elif buy_count >= 2 and buy_count >= sell_count:
                             proposed_dir = "LONG"
                         else:
-                            self.skipped_cycles += 1
-                            continue  # Not enough signals for either direction
-
-                        # ── v6: MARKET REGIME FILTER ───────────────────────
-                        regime_result = self._safe_tool_call(
-                            "MarketRegimeDetector",
-                            lambda: MarketRegimeDetector.analyze(history),
-                            {"regime": "UNKNOWN", "trade_direction": "ANY", "strength": 0.0, "verdict": "Tool error"},
-                        )
-                        regime = regime_result["regime"]
-                        allowed_dir   = regime_result["trade_direction"]
-
-                        if regime == "CHOPPY":
-                            update_intent(f"🌊 CHOPPY regime — skipping signal. {regime_result['verdict']}", [symbol])
-                            continue
-
-                        if allowed_dir not in ("ANY", proposed_dir):
-                            update_intent(
-                                f"🚫 Regime MISMATCH: {proposed_dir} rejected in {regime} market. {regime_result['verdict']}",
-                                [symbol]
-                            )
-                            continue
-
-                        # ── Sentiment Gate ─────────────────────────────────
-                        sentiment_ok, sentiment_verdict = self._sentiment_gate(symbol, proposed_dir)
-                        if not sentiment_ok:
-                            self.skipped_cycles += 1
-                            update_intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            directional_action = "LONG" if buy_count > sell_count else ("SHORT" if sell_count > buy_count else "NEUTRAL")
+                            directional_conf = max(buy_count, sell_count) / 8.0
                             save_signal_event(
                                 symbol,
                                 current_price,
@@ -797,9 +1903,168 @@ class TradingEngine:
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
                                 "SKIPPED",
-                                decision_source="SENTIMENT_REJECT",
-                                deterministic_action=proposed_dir,
-                                deterministic_conf=max(buy_count, sell_count) / 8.0,
+                                decision_source=self._mode_decision_source(active_mode, "DIRECTIONAL_EDGE_REJECT"),
+                                deterministic_action=directional_action if directional_action != "NEUTRAL" else None,
+                                deterministic_conf=directional_conf,
+                            )
+                            continue  # Not enough signals for either direction
+
+                        det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count)
+                        deterministic_dir = "LONG" if det_action == "BUY" else ("SHORT" if det_action == "SELL" else "NEUTRAL")
+                        if det_action == "NEUTRAL":
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "DETERMINISTIC_NEUTRAL"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            continue
+
+                        # ── v6: MARKET REGIME FILTER ───────────────────────
+                        regime_result = self._safe_tool_call(
+                            "MarketRegimeDetector",
+                            lambda: MarketRegimeDetector.analyze(history),
+                            {"regime": "UNKNOWN", "trade_direction": "ANY", "strength": 0.0, "verdict": "Tool error"},
+                        )
+                        regime = regime_result["regime"]
+                        allowed_dir   = regime_result["trade_direction"]
+                        baseline_edge_pct = self._estimate_expected_edge_pct(
+                            buy_count,
+                            sell_count,
+                            config.TAKE_PROFIT_PCT,
+                            config.EARLY_STOP_LOSS_PCT,
+                        )
+
+                        if regime == "CHOPPY":
+                            vote_imbalance = abs(buy_count - sell_count) / 8.0
+                            if (
+                                not config.ALLOW_CHOPPY_HIGH_CONVICTION
+                                or vote_imbalance < config.CHOPPY_MIN_VOTE_IMBALANCE
+                                or max(det_conf, 0.0) < config.CHOPPY_MIN_CONFIDENCE
+                            ):
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(
+                                    f"🌊 CHOPPY regime — skip weak setup. "
+                                    f"Need vote_imbalance>={config.CHOPPY_MIN_VOTE_IMBALANCE:.2f}, "
+                                    f"conf>={config.CHOPPY_MIN_CONFIDENCE:.2f}. {regime_result['verdict']}",
+                                    [symbol],
+                                )
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "REGIME_CHOPPY_SKIP"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="regime_choppy_skip",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=None,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                )
+                                continue
+                            intent(
+                                f"⚡ CHOPPY override — high-conviction setup allowed "
+                                f"({vote_imbalance:.2f} imbalance, conf {det_conf:.2f}).",
+                                [symbol],
+                            )
+
+                        if allowed_dir not in ("ANY", proposed_dir):
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            intent(
+                                f"🚫 Regime MISMATCH: {proposed_dir} rejected in {regime} market. {regime_result['verdict']}",
+                                [symbol]
+                            )
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "REGIME_MISMATCH"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="regime_mismatch",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=None,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                            )
+                            continue
+
+                        # ── Sentiment Gate ─────────────────────────────────
+                        sentiment_snapshot = None
+                        if config.ENABLE_SENTIMENT_GATE or active_mode in {"FUTURES", "OPTIONS", "SPOT"}:
+                            sentiment_snapshot = self._safe_tool_call(
+                                "MarketSentiment",
+                                lambda: build_sentiment_snapshot(
+                                    alpha_key=config.ALPHAVANTAGE_API_KEY,
+                                    cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+                                    symbol=symbol,
+                                ),
+                                None,
+                            )
+
+                        sentiment_ok, sentiment_verdict = self._sentiment_gate(
+                            symbol, proposed_dir, snapshot=sentiment_snapshot
+                        )
+                        if not sentiment_ok:
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "SENTIMENT_REJECT"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="sentiment_reject",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
                             )
                             continue
 
@@ -819,38 +2084,169 @@ class TradingEngine:
                             {"confirms": True, "htf_trend": "UNKNOWN", "verdict": "Tool error"},
                         )
                         if not mtf_result["confirms"] and mtf_result["htf_trend"] != "UNKNOWN":
-                            update_intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
+                            intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
                             # Soft reject: add to miss count but don't hard-block
-                            self.skipped_cycles += 1
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "HTF_REJECT"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="htf_reject",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                            )
                             continue
 
                         now = datetime.now()
 
                         # ── DIRECTION BLOCK ─────────────────────────────────
-                        block = self.direction_block.get(symbol)
+                        pos_key = self._pos_key(symbol, active_mode)
+                        block = self.direction_block.get(pos_key)
                         if block and block["side"] == proposed_dir and now < block["blocked_until"]:
                             remaining_block = int((block["blocked_until"] - now).total_seconds())
-                            update_intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            intent(f"🚫 {proposed_dir} BLOCKED ({remaining_block}s — consecutive losses)", [symbol])
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "DIRECTION_BLOCK"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="direction_block",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                            )
                             continue
 
                         # ── POST-CLOSE COOLDOWN (300s) ─────────────────────
-                        if self.last_close_time and (now - self.last_close_time).total_seconds() < 300:
-                            remaining_cd = 300 - int((now - self.last_close_time).total_seconds())
-                            if self.skipped_cycles % 3 == 0:
-                                update_intent(f"⏸ Post-close cooldown: {remaining_cd}s remaining", [symbol])
+                        last_close_time = self.last_close_time_by_mode.get(active_mode)
+                        if last_close_time and (now - last_close_time).total_seconds() < 300:
+                            remaining_cd = 300 - int((now - last_close_time).total_seconds())
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            if self.skipped_cycles_by_mode[active_mode] % 3 == 0:
+                                intent(f"⏸ Post-close cooldown: {remaining_cd}s remaining", [symbol])
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "POST_CLOSE_COOLDOWN"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="post_close_cooldown",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                            )
                             continue
 
                         # ── HARD DUPLICATE BLOCKER ──────────────────────────
-                        last_entry = self.last_entry_prices.get(symbol)
+                        last_entry = self.last_entry_prices.get(pos_key)
                         if last_entry:
                             last_price, last_side, last_time = last_entry
                             time_since = (now - last_time).total_seconds()
                             price_diff_pct = abs(current_price - last_price) / last_price
                             if time_since < 600:
-                                update_intent(f"⏸ Entry blocked: {int(600 - time_since)}s lockout remaining", [symbol])
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(f"⏸ Entry blocked: {int(600 - time_since)}s lockout remaining", [symbol])
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "ENTRY_LOCKOUT"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="entry_lockout",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=sentiment_snapshot,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                )
                                 continue
                             if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 1200:
-                                update_intent(f"⏸ Duplicate blocked: {proposed_dir} only {price_diff_pct*100:.3f}% from last entry", [symbol])
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(f"⏸ Duplicate blocked: {proposed_dir} only {price_diff_pct*100:.3f}% from last entry", [symbol])
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "DUPLICATE_BLOCK"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="duplicate_block",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=sentiment_snapshot,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                )
                                 continue
 
                         vel_result = self._safe_tool_call(
@@ -917,14 +2313,9 @@ class TradingEngine:
                             }
                         )
 
-                        det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count)
-                        if det_action == "NEUTRAL":
-                            self.skipped_cycles += 1
-                            continue
-
                         expected_edge_pct = self._estimate_expected_edge_pct(buy_count, sell_count, dynamic_tp, dynamic_sl)
                         if expected_edge_pct < config.MIN_EXPECTED_EDGE_PCT:
-                            self.skipped_cycles += 1
+                            self.skipped_cycles_by_mode[active_mode] += 1
                             save_signal_event(
                                 symbol,
                                 current_price,
@@ -934,8 +2325,67 @@ class TradingEngine:
                                 macd_result["crossover"],
                                 bb_result["position_pct"],
                                 "SKIPPED",
-                                decision_source="EDGE_REJECT",
-                                deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                                decision_source=self._mode_decision_source(active_mode, "EDGE_REJECT"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="edge_reject",
+                                expected_edge_pct=expected_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                            )
+                            continue
+
+                        pre_policy = self._product_policy_decision(
+                            mode=active_mode,
+                            symbol=symbol,
+                            stage="pre-llm",
+                            proposed_dir=proposed_dir,
+                            buy_count=buy_count,
+                            sell_count=sell_count,
+                            confidence=det_conf,
+                            expected_edge_pct=expected_edge_pct,
+                            regime_result=regime_result,
+                            session_filt=session_filt,
+                            vol_result=vol_result,
+                            vol_prof=vol_prof,
+                            sentiment_snapshot=sentiment_snapshot,
+                            vel_result=vel_result,
+                            macd_result=macd_result,
+                            ema_result=ema_result,
+                            ob_result=ob_result,
+                            enforce_confidence_gate=False,
+                        )
+                        self._log_product_eval(symbol, "pre-llm", pre_policy, mode=active_mode)
+                        if not bool((pre_policy or {}).get("allow")):
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            self._rl_reward_skip_opportunity(
+                                active_mode,
+                                pre_policy,
+                                expected_edge_pct=expected_edge_pct,
+                                reason="pre_policy_reject",
+                                symbol=symbol,
+                            )
+                            intent(f"🚫 [{active_mode}] {pre_policy.get('verdict', 'Rejected')}", [symbol])
+                            reject_source = f"{active_mode}_REJECT"
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, reject_source),
+                                deterministic_action=deterministic_dir,
                                 deterministic_conf=det_conf,
                             )
                             continue
@@ -952,21 +2402,61 @@ class TradingEngine:
                         if borderline_setup:
                             llm_ok, llm_reason = self._llm_budget_ok()
                             if not llm_ok:
-                                self.skipped_cycles += 1
-                                update_intent(f"⏳ LLM blocked: {llm_reason}", [symbol])
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(f"⏳ LLM blocked: {llm_reason}", [symbol])
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "LLM_BUDGET_BLOCK"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
                                 continue
 
                             if self.last_llm_call and (now - self.last_llm_call).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
+                                self.skipped_cycles_by_mode[active_mode] += 1
                                 wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
-                                if self.skipped_cycles % 2 == 0:
-                                    update_intent(
+                                if self.skipped_cycles_by_mode[active_mode] % 2 == 0:
+                                    intent(
                                         f"⚡ Borderline setup {proposed_dir} ({buy_count}B/{sell_count}S) | LLM in {wait_left}s...",
                                         [symbol],
                                     )
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "LLM_THROTTLED"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
                                 continue
 
                             if not self.llm_agent:
-                                self.skipped_cycles += 1
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    buy_count,
+                                    sell_count,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "LLM_AGENT_UNAVAILABLE"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
                                 continue
 
                             self.last_llm_call = now
@@ -996,7 +2486,7 @@ class TradingEngine:
                                 or llm_signal.confidence < confidence_floor
                                 or effective_conf < config.MIN_ENSEMBLE_CONFIDENCE
                             ):
-                                self.skipped_cycles += 1
+                                self.skipped_cycles_by_mode[active_mode] += 1
                                 conf = llm_signal.confidence if llm_signal else 0.0
                                 action = llm_signal.action if llm_signal else "NEUTRAL"
                                 save_signal_event(
@@ -1010,8 +2500,8 @@ class TradingEngine:
                                     "MISSED",
                                     claude_action=action,
                                     claude_conf=conf,
-                                    decision_source="LLM_REJECT",
-                                    deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                                    decision_source=self._mode_decision_source(active_mode, "LLM_REJECT"),
+                                    deterministic_action=deterministic_dir,
                                     deterministic_conf=det_conf,
                                     llm_cost_usd=llm_cost,
                                     llm_tokens=llm_tokens,
@@ -1035,6 +2525,56 @@ class TradingEngine:
                             final_conf = llm_signal.confidence
                             final_reason = llm_signal.reason
 
+                        final_dir = "LONG" if final_action == "BUY" else "SHORT"
+                        post_policy = self._product_policy_decision(
+                            mode=active_mode,
+                            symbol=symbol,
+                            stage="post-llm",
+                            proposed_dir=final_dir,
+                            buy_count=buy_count,
+                            sell_count=sell_count,
+                            confidence=final_conf,
+                            expected_edge_pct=expected_edge_pct,
+                            regime_result=regime_result,
+                            session_filt=session_filt,
+                            vol_result=vol_result,
+                            vol_prof=vol_prof,
+                            sentiment_snapshot=sentiment_snapshot,
+                            vel_result=vel_result,
+                            macd_result=macd_result,
+                            ema_result=ema_result,
+                            ob_result=ob_result,
+                        )
+                        self._log_product_eval(symbol, "post-llm", post_policy, mode=active_mode)
+                        if not bool((post_policy or {}).get("allow")):
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            self._rl_reward_skip_opportunity(
+                                active_mode,
+                                post_policy,
+                                expected_edge_pct=expected_edge_pct,
+                                reason="post_policy_reject",
+                                symbol=symbol,
+                            )
+                            intent(f"🚫 [{active_mode}] {post_policy.get('verdict', 'Rejected')}", [symbol])
+                            reject_source = f"{active_mode}_REJECT"
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, reject_source),
+                                deterministic_action=final_dir,
+                                deterministic_conf=det_conf,
+                                llm_cost_usd=llm_cost,
+                                llm_tokens=llm_tokens,
+                            )
+                            continue
+                        selected_mode, policy_eval = active_mode, post_policy
+
                         # ── Position sizing (risk-capped) ──────────────────
                         base_conf = final_conf
                         if base_conf >= 0.80:
@@ -1046,6 +2586,15 @@ class TradingEngine:
                         else:
                             pos_usdt = 125
 
+                        recommended_leverage = 1
+                        product_score = None
+                        product_strategy = "SPOT_FLOW"
+                        if selected_mode in {"FUTURES", "OPTIONS", "SPOT"}:
+                            recommended_leverage = int(policy_eval.get("recommended_leverage", 1) or 1)
+                            product_score = float(policy_eval.get("composite_score", 0.0) or 0.0)
+                            product_strategy = str(policy_eval.get("recommended_strategy", "N/A"))
+                            pos_usdt = int(pos_usdt * float(policy_eval.get("size_multiplier", 1.0) or 1.0))
+
                         if self.consecutive_losses >= 2:
                             pos_usdt = int(pos_usdt * 0.7)
                             logger.info(f"📉 Risk cut: position shrunk to ${pos_usdt:,} (loss streak)")
@@ -1053,25 +2602,85 @@ class TradingEngine:
                         max_by_risk = int(self.simulator.balance_usdt * config.MAX_RISK_PER_TRADE_PCT_BALANCE)
                         min_pos = int(config.MIN_POSITION_SIZE_USDT)
                         if max_by_risk < min_pos:
-                            self.skipped_cycles += 1
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "RISK_CAP_BLOCK"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                                llm_cost_usd=llm_cost,
+                                llm_tokens=llm_tokens,
+                            )
                             continue
                         pos_usdt = max(min_pos, min(pos_usdt, max_by_risk, int(self.simulator.balance_usdt)))
                         pos_usdt = min(pos_usdt, int(config.MAX_POSITION_SIZE_USDT))
                         if pos_usdt < min_pos:
-                            self.skipped_cycles += 1
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "POSITION_SIZE_TOO_SMALL"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                                llm_cost_usd=llm_cost,
+                                llm_tokens=llm_tokens,
+                            )
                             continue
 
                         side = "LONG" if final_action == "BUY" else "SHORT"
+                        decision_source_tag = decision_source
+                        if selected_mode == "FUTURES":
+                            decision_source_tag = f"FUTURES_{decision_source}"
+                        elif selected_mode == "OPTIONS":
+                            decision_source_tag = f"OPTIONS_{decision_source}"
+                        elif selected_mode == "SPOT":
+                            decision_source_tag = f"SPOT_{decision_source}"
+                        product_context = ""
+                        if selected_mode == "FUTURES":
+                            product_context = f" | FutScore:{product_score:.3f} | Lev:{recommended_leverage}x"
+                        elif selected_mode == "OPTIONS":
+                            product_context = f" | OptScore:{product_score:.3f} | Strat:{product_strategy}"
+                        elif selected_mode == "SPOT":
+                            product_context = f" | SpotScore:{product_score:.3f} | Strat:{product_strategy}"
                         reason = (
                             f"{decision_source}({final_conf:.2f}) | {buy_count}B/{sell_count}S | "
                             f"{regime} | {session_filt['session']} | {sentiment_verdict} | Edge:{expected_edge_pct:+.3f}% | "
-                            f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}% | {final_reason}"
+                            f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}%{product_context} | {final_reason}"
                         )
+                        rl_context = {
+                            "mode": selected_mode,
+                            "state_key": str(policy_eval.get("rl_state_key", "") or ""),
+                            "profile_id": str(policy_eval.get("rl_profile_id", "") or ""),
+                            "expected_edge_pct": float(expected_edge_pct or 0.0),
+                            "entry_notional_usdt": float(pos_usdt),
+                        }
+                        pos_key = self._pos_key(symbol, selected_mode)
+                        self._pending_rl_by_symbol[pos_key] = rl_context
 
                         self.trades_executed += 1
-                        self.skipped_cycles = 0
-                        update_intent(
-                            f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{final_conf:.2f} | {decision_source}",
+                        self.skipped_cycles_by_mode[active_mode] = 0
+                        lev_label = ""
+                        if selected_mode == "FUTURES":
+                            lev_label = f" | lev:{recommended_leverage}x"
+                        elif selected_mode == "OPTIONS":
+                            lev_label = f" | strat:{product_strategy}"
+                        elif selected_mode == "SPOT":
+                            lev_label = f" | strat:{product_strategy}"
+                        intent(
+                            f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{final_conf:.2f} | {decision_source_tag}{lev_label} | pool:shared",
                             [symbol],
                         )
                         self.simulator.enter_position(
@@ -1080,17 +2689,25 @@ class TradingEngine:
                             pos_usdt,
                             reason,
                             side=side,
-                            decision_source=decision_source,
+                            decision_source=decision_source_tag,
                             deterministic_conf=det_conf,
                             llm_conf=final_conf if decision_source == "LLM_TIEBREAKER" else None,
                             llm_cost_usd=llm_cost if decision_source == "LLM_TIEBREAKER" else 0.0,
+                            mode=selected_mode,
                         )
 
-                        if symbol in self.simulator.positions:
-                            self.simulator.positions[symbol]["dynamic_sl"] = dynamic_sl
-                            self.simulator.positions[symbol]["dynamic_tp"] = dynamic_tp
-                            self.simulator.positions[symbol]["pyramid_count"] = 0
-                            self.simulator.positions[symbol]["original_pos_usdt"] = pos_usdt
+                        if pos_key in self.simulator.positions:
+                            self.simulator.positions[pos_key]["dynamic_sl"] = dynamic_sl
+                            self.simulator.positions[pos_key]["dynamic_tp"] = dynamic_tp
+                            self.simulator.positions[pos_key]["pyramid_count"] = 0
+                            self.simulator.positions[pos_key]["original_pos_usdt"] = pos_usdt
+                            self.simulator.positions[pos_key]["recommended_leverage"] = recommended_leverage
+                            self.simulator.positions[pos_key]["futures_score"] = product_score
+                            self.simulator.positions[pos_key]["spot_score"] = product_score
+                            self.simulator.positions[pos_key]["spot_strategy"] = product_strategy
+                            self.simulator.positions[pos_key]["options_strategy"] = product_strategy
+                            self.simulator.positions[pos_key]["selected_product"] = selected_mode
+                            self.simulator.positions[pos_key]["rl_context"] = rl_context
 
                         save_signal_event(
                             symbol,
@@ -1103,8 +2720,8 @@ class TradingEngine:
                             "TRADED",
                             claude_action=side if decision_source == "LLM_TIEBREAKER" else None,
                             claude_conf=final_conf if decision_source == "LLM_TIEBREAKER" else None,
-                            decision_source=decision_source,
-                            deterministic_action="LONG" if det_action == "BUY" else "SHORT",
+                            decision_source=decision_source_tag,
+                            deterministic_action=deterministic_dir,
                             deterministic_conf=det_conf,
                             llm_cost_usd=llm_cost,
                             llm_tokens=llm_tokens,

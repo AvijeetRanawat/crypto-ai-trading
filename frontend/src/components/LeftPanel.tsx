@@ -1,22 +1,23 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Chart, type ChartData, registerables } from "chart.js";
 import { ColorType, CrosshairMode, createChart, type UTCTimestamp } from "lightweight-charts";
-import type { MarketPoint, PortfolioSummary, SignalEvent, Trade, WarmupData } from "../types/dashboard";
+import type { MarketPoint, PortfolioSummary, RlCostSummary, SignalEvent, Trade, WarmupData } from "../types/dashboard";
 import { formatPair, formatPct, formatUsd } from "../utils/format";
 import { getThemeTokens } from "../utils/theme";
-import { SUPPORTED_SYMBOLS } from "../utils/constants";
 
 Chart.register(...registerables);
 
 interface LeftPanelProps {
   theme: "light" | "dark";
   selectedSymbol: string;
+  symbolOptions: string[];
   onSelectSymbol: (symbol: string) => void;
   warmup: WarmupData;
   marketHistory: MarketPoint[];
   summary: PortfolioSummary;
   signals: SignalEvent[];
   trades: Trade[];
+  rlCostSummary: RlCostSummary;
 }
 
 interface PerfSummary {
@@ -52,12 +53,14 @@ function getPriceDigits(price: number): number {
 export function LeftPanel({
   theme,
   selectedSymbol,
+  symbolOptions,
   onSelectSymbol,
   warmup,
   marketHistory,
   summary,
   signals,
   trades,
+  rlCostSummary,
 }: LeftPanelProps) {
   type ChartApi = ReturnType<typeof createChart>;
   type LineSeriesApi = ReturnType<ChartApi["addLineSeries"]>;
@@ -378,7 +381,7 @@ export function LeftPanel({
           value={selectedSymbol}
           onChange={(e) => onSelectSymbol(e.target.value)}
         >
-          {SUPPORTED_SYMBOLS.map((symbol) => (
+          {symbolOptions.map((symbol) => (
             <option key={symbol} value={symbol}>
               {formatPair(symbol)}
             </option>
@@ -493,6 +496,34 @@ export function LeftPanel({
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        <div className="rl-cost-card glass">
+          <div className="card-label">RL AGENT COST</div>
+          <div className="rl-cost-grid">
+            <div className="rl-cost-row">
+              <span>Session Events</span>
+              <span>{rlCostSummary.session.events}</span>
+            </div>
+            <div className="rl-cost-row">
+              <span>Session Penalty</span>
+              <span className="negative">{formatUsd(-Math.abs(rlCostSummary.session.total_penalty))}</span>
+            </div>
+            <div className="rl-cost-row">
+              <span>Skip Penalty</span>
+              <span className="negative">{formatUsd(-Math.abs(rlCostSummary.session.skip_penalty))}</span>
+            </div>
+            <div className="rl-cost-row">
+              <span>Hold Penalty</span>
+              <span className="negative">{formatUsd(-Math.abs(rlCostSummary.session.hold_penalty))}</span>
+            </div>
+            <div className="rl-cost-row">
+              <span>Reward</span>
+              <span className={rlCostSummary.session.total_reward >= 0 ? "positive" : "negative"}>
+                {formatUsd(rlCostSummary.session.total_reward)}
+              </span>
+            </div>
           </div>
         </div>
       </div>

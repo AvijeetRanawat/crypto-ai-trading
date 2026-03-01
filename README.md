@@ -34,7 +34,18 @@ Exchange selection is controlled by `EXCHANGE` in `.env`.
 - `BEDROCK` (Anthropic models through AWS Bedrock)
 - `OPENAI` (Chat Completions API)
 
+## Free Local LLM (Mac M1 / Apple Silicon)
+
+- Use a quantized model such as `phi-3-mini`, `gemma-2b`, or `tinyllama` together with `llama-cpp-python`. These models are open-source, small (≤4 B parameters), and can run on M1 CPU/GPU without external API costs.
+- Set `LOCAL_LLM_ENABLED=true` and point `LOCAL_LLM_MODEL_PATH` to the downloaded `.ggml` or `gguf` binary. The summarizer now runs locally via `llama_cpp` and still feeds the dashboard’s LLM usage counters.
+- Recommended quantized weights: `phi-3-mini-ggml-q4_0.bin` or similar from Hugging Face / phi-3 Mini community builds. Keep the file under `~/models/` and update `.env` accordingly.
+
 Provider selection is controlled by `LLM_PROVIDER` in `.env`.
+
+## MLX Deep RL (Mac M1 / Apple Silicon)
+
+- Enable MLX-based deep RL for weight selection: `ENABLE_MLX_RL_AGENT=true`.
+- This uses Apple’s `mlx` package for a tiny MLP contextual bandit and runs locally with no paid APIs.
 
 ## Quick Start
 

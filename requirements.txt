@@ -7,3 +7,6 @@ pytest-asyncio
 fastapi
 uvicorn
 boto3
+mlx
+llama-cpp-python>=0.2.9
+httpx

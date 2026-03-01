@@ -5,12 +5,15 @@ import json
 import re
 import time
 import hashlib
+import boto3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from xml.etree import ElementTree
 
 import requests
 from logger import logger
+from config import config
+from local_llm import get_local_llm_agent
 
 
 REQUEST_TIMEOUT_SECONDS = 8
@@ -466,6 +469,32 @@ def _build_summary_prompt(snapshot: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def summarize_sentiment_with_local_model(snapshot: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    agent = get_local_llm_agent()
+    if not agent or not agent.ready():
+        return None, None
+    prompt = _build_summary_prompt(snapshot)
+    text, usage = agent.complete(prompt)
+    out = dict(snapshot)
+    summary_text = text or "Local model produced no summary."
+    out["llm_summary"] = {
+        "text": summary_text,
+        "model_id": agent.model_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cached": False,
+    }
+    usage_event = {
+        "model_id": agent.model_id,
+        "token_cost_usd": 0.0,
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or len(summary_text.split())),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+        "latency_ms": int(usage.get("latency_ms") or 0),
+        "source": "local",
+    }
+    return out, usage_event
+
+
 def _summary_fingerprint(snapshot: Dict[str, Any]) -> str:
     head = [
         {
@@ -484,7 +513,28 @@ def _summary_fingerprint(snapshot: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def summarize_sentiment_with_openai(
+def _bedrock_model_candidates(model_id: str) -> List[str]:
+    from config import config as _cfg
+
+    raw = str(model_id or "").strip()
+    out: List[str] = []
+    profile = str(getattr(_cfg, "BEDROCK_INFERENCE_PROFILE_ID", "") or "").strip()
+    if profile:
+        out.append(profile)
+    if raw:
+        out.append(raw)
+        if not (raw.startswith("us.") or raw.startswith("eu.") or raw.startswith("apac.") or raw.startswith("arn:")):
+            out.append(f"us.{raw}")
+    seen = set()
+    uniq: List[str] = []
+    for m in out:
+        if m and m not in seen:
+            seen.add(m)
+            uniq.append(m)
+    return uniq
+
+
+def summarize_sentiment_with_api(
     snapshot: Dict[str, Any],
     *,
     openai_api_key: str,
@@ -804,3 +854,207 @@ def summarize_sentiment_with_openai(
         f"tokens={total_tokens} cost=${cost:.6f} latency_ms={latency_ms}"
     )
     return out, usage_event
+
+
+def summarize_sentiment_with_openai(
+    snapshot: Dict[str, Any],
+    *,
+    openai_api_key: str,
+    openai_base_url: str,
+    model_id: str = "gpt-5-nano",
+    input_price_per_1m: float = 0.05,
+    output_price_per_1m: float = 0.40,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """
+    Backward-compatible alias.
+    Prefer `summarize_sentiment_with_api`.
+    """
+    return summarize_sentiment_with_api(
+        snapshot,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        model_id=model_id,
+        input_price_per_1m=input_price_per_1m,
+        output_price_per_1m=output_price_per_1m,
+    )
+
+
+def summarize_sentiment_with_bedrock(
+    snapshot: Dict[str, Any],
+    *,
+    model_id: str,
+    aws_region: str = "us-east-1",
+    input_price_per_1m: float = 3.0,
+    output_price_per_1m: float = 15.0,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """
+    Bedrock equivalent of sentiment summarization used by dashboard.
+    Returns (augmented_snapshot, usage_event_or_none).
+    """
+    fingerprint = _summary_fingerprint(snapshot)
+    now = time.time()
+    cached = _SUMMARY_CACHE.get("summary")
+    cached_fp = _SUMMARY_CACHE.get("fingerprint", "")
+    cached_symbol = str((cached or {}).get("symbol", "")).upper()
+    current_symbol = str(snapshot.get("symbol", "")).upper()
+    if (
+        cached
+        and cached_symbol == current_symbol
+        and cached_fp == fingerprint
+        and now - float(_SUMMARY_CACHE.get("ts", 0.0)) < SUMMARY_CACHE_TTL_SECONDS
+    ):
+        out = dict(snapshot)
+        out["llm_summary"] = dict(cached)
+        out["llm_summary"]["cached"] = True
+        return out, None
+
+    prompt = _build_summary_prompt(snapshot)
+    started = time.time()
+    try:
+        req_payload = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 220,
+            "temperature": 0.1,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        }
+        logger.info("BEDROCK_REQ invoke_model model=%s symbol=%s region=%s", model_id, current_symbol, aws_region)
+        logger.info(
+            "BEDROCK_REQ_VERBOSE model=%s payload=%s",
+            model_id,
+            json.dumps(req_payload, default=str),
+        )
+        client = boto3.client(service_name="bedrock-runtime", region_name=aws_region)
+        resp = None
+        used_model_id = model_id
+        last_error = None
+        for candidate in _bedrock_model_candidates(model_id):
+            try:
+                logger.info("BEDROCK_REQ invoke_model_try model=%s symbol=%s", candidate, current_symbol)
+                resp = client.invoke_model(
+                    body=json.dumps(req_payload),
+                    modelId=candidate,
+                    accept="application/json",
+                    contentType="application/json",
+                )
+                used_model_id = candidate
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("BEDROCK_RETRY model=%s symbol=%s err=%s", candidate, current_symbol, e)
+                continue
+        if resp is None:
+            raise last_error or RuntimeError("Bedrock invoke failed")
+        latency_ms = int((time.time() - started) * 1000)
+        payload = json.loads(resp.get("body").read())
+        logger.info("BEDROCK_RES invoke_model model=%s symbol=%s -> 200 (%sms)", used_model_id, current_symbol, latency_ms)
+        logger.info("BEDROCK_RES_VERBOSE model=%s body=%s", used_model_id, json.dumps(payload, default=str))
+
+        content = payload.get("content") or []
+        text = ""
+        if content and isinstance(content, list):
+            text = str((content[0] or {}).get("text") or "").strip()
+        if not text:
+            choices = payload.get("choices") or []
+            if choices and isinstance(choices, list):
+                text = str((((choices[0] or {}).get("message") or {}).get("content") or "")).strip()
+        if not text:
+            text = "Summary unavailable: model returned empty output."
+            logger.warning("BEDROCK_EMPTY_OUTPUT model=%s symbol=%s", model_id, current_symbol)
+
+        usage = payload.get("usage", {}) or {}
+        input_tokens = int(
+            usage.get("input_tokens")
+            or usage.get("inputTokens")
+            or usage.get("prompt_tokens")
+            or _estimate_tokens(prompt)
+        )
+        output_tokens = int(
+            usage.get("output_tokens")
+            or usage.get("outputTokens")
+            or usage.get("completion_tokens")
+            or _estimate_tokens(text)
+        )
+        total_tokens = int(usage.get("total_tokens") or usage.get("totalTokens") or (input_tokens + output_tokens))
+        cost = round(
+            ((input_tokens / 1_000_000) * input_price_per_1m)
+            + ((output_tokens / 1_000_000) * output_price_per_1m),
+            8,
+        )
+
+        summary = {
+            "text": text,
+            "model_id": used_model_id,
+            "symbol": current_symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "cached": False,
+        }
+        usage_event = {
+            "stage": "news_sentiment_summary",
+            "model_id": used_model_id,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "latency_ms": latency_ms,
+            "estimated_cost_usd": cost,
+        }
+
+        _SUMMARY_CACHE["ts"] = now
+        _SUMMARY_CACHE["fingerprint"] = fingerprint
+        _SUMMARY_CACHE["summary"] = summary
+        _SUMMARY_CACHE["usage_event"] = usage_event
+
+        out = dict(snapshot)
+        out["llm_summary"] = dict(summary)
+        logger.info(
+            "BEDROCK_SUMMARY_OK model=%s symbol=%s tokens=%s cost=$%.6f latency_ms=%s",
+            used_model_id,
+            current_symbol,
+            total_tokens,
+            cost,
+            latency_ms,
+        )
+        return out, usage_event
+    except Exception as e:
+        logger.error("BEDROCK_ERR model=%s symbol=%s error=%s", model_id, current_symbol, e, exc_info=True)
+        out = dict(snapshot)
+        out["llm_summary"] = {
+            "text": f"LLM summary unavailable: {e}",
+            "model_id": model_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "cached": True,
+        }
+        return out, None
+
+
+def summarize_sentiment_with_llm(
+    snapshot: Dict[str, Any],
+    *,
+    provider: str,
+    model_id: str,
+    openai_api_key: str = "",
+    openai_base_url: str = "https://api.openai.com/v1",
+    aws_region: str = "us-east-1",
+    input_price_per_1m: float = 0.05,
+    output_price_per_1m: float = 0.40,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    provider_upper = str(provider or "OPENAI").upper()
+    if config.LOCAL_LLM_ENABLED:
+        local_result = summarize_sentiment_with_local_model(snapshot)
+        if local_result[0]:
+            return local_result
+    if provider_upper == "BEDROCK":
+        return summarize_sentiment_with_bedrock(
+            snapshot,
+            model_id=model_id,
+            aws_region=aws_region,
+            input_price_per_1m=input_price_per_1m,
+            output_price_per_1m=output_price_per_1m,
+        )
+    return summarize_sentiment_with_api(
+        snapshot,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        model_id=model_id,
+        input_price_per_1m=input_price_per_1m,
+        output_price_per_1m=output_price_per_1m,
+    )

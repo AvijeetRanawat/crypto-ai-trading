@@ -5,6 +5,7 @@ These tools run locally (free, instant) and feed structured outputs to Claude.
 v2: Added RSIAnalyzer, MACDSignal, BollingerBands, SupportResistance, CandlePatterns
 """
 import statistics
+from config import config
 
 
 
@@ -819,9 +820,9 @@ class MarketRegimeDetector:
             prices[-1] < prices[-10],
         ])
 
-        if efficiency < 0.15:
+        if efficiency < config.CHOPPY_EFFICIENCY_THRESHOLD:
             regime = "CHOPPY"
-            verdict = f"CHOPPY — Market oscillating ({efficiency:.2%} efficiency). Skip all trades."
+            verdict = f"CHOPPY — Market oscillating ({efficiency:.2%} efficiency). Trade only high-conviction setups."
             direction = "NONE"
         elif bull_signals >= 2:
             regime = "BULL"

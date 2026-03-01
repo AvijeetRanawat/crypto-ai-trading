@@ -15,10 +15,12 @@ async def main():
     channels = config.BLUE_CHIP_WHITELIST
     
     try:
-        # Run all tasks concurrently
+        # Run all tasks concurrently (shared balance across modes).
         tasks = [
             client.connect_ws(channels),
-            engine.run_loop(),
+            engine.run_loop("SPOT"),
+            engine.run_loop("FUTURES"),
+            engine.run_loop("OPTIONS"),
         ]
         if config.ENABLE_PERIODIC_REVIEW:
             tasks.append(engine._periodic_self_improvement_loop())

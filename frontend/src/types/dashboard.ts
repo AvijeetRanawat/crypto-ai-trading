@@ -162,11 +162,68 @@ export interface NewsSentiment {
   };
 }
 
+export interface StrategyDecision {
+  timestamp: string;
+  outcome: string;
+  decision_source: string;
+  action: string;
+  confidence: number;
+  buy_votes: number;
+  sell_votes: number;
+}
+
+export interface StrategyDiagnostics {
+  symbol: string;
+  mode: string;
+  strategy_note: string;
+  session_signals: {
+    total: number;
+    traded: number;
+    missed: number;
+    skipped: number;
+  };
+  session_trades: {
+    closed: number;
+    wins: number;
+    win_rate: number;
+    avg_pnl: number;
+    total_pnl: number;
+  };
+  latest_trade_reason: string;
+  recent_decisions: StrategyDecision[];
+}
+
+export interface RlCostBucket {
+  events: number;
+  skip_penalty: number;
+  hold_penalty: number;
+  total_penalty: number;
+  total_reward: number;
+}
+
+export interface RlCostEvent {
+  timestamp: string;
+  event_type: string;
+  mode: string;
+  symbol: string;
+  profile_id: string;
+  reason: string;
+  reward: number;
+  penalty: number;
+}
+
+export interface RlCostSummary {
+  session: RlCostBucket;
+  today: RlCostBucket;
+  all_time: RlCostBucket;
+  recent: RlCostEvent[];
+}
+
 export const DEFAULT_WARMUP: WarmupData = {
   symbol: "BTCUSDT",
   done: false,
   ticks: 0,
-  min_ticks: 35,
+  min_ticks: 10,
   pct: 0,
   seconds_remaining: 0,
 };
@@ -248,4 +305,50 @@ export const DEFAULT_NEWS_SENTIMENT: NewsSentiment = {
     timestamp: "",
     cached: true,
   },
+};
+
+export const DEFAULT_STRATEGY_DIAGNOSTICS: StrategyDiagnostics = {
+  symbol: "BTCUSDT",
+  mode: "SPOT",
+  strategy_note: "Loading strategy diagnostics...",
+  session_signals: {
+    total: 0,
+    traded: 0,
+    missed: 0,
+    skipped: 0,
+  },
+  session_trades: {
+    closed: 0,
+    wins: 0,
+    win_rate: 0,
+    avg_pnl: 0,
+    total_pnl: 0,
+  },
+  latest_trade_reason: "",
+  recent_decisions: [],
+};
+
+export const DEFAULT_RL_COST_SUMMARY: RlCostSummary = {
+  session: {
+    events: 0,
+    skip_penalty: 0,
+    hold_penalty: 0,
+    total_penalty: 0,
+    total_reward: 0,
+  },
+  today: {
+    events: 0,
+    skip_penalty: 0,
+    hold_penalty: 0,
+    total_penalty: 0,
+    total_reward: 0,
+  },
+  all_time: {
+    events: 0,
+    skip_penalty: 0,
+    hold_penalty: 0,
+    total_penalty: 0,
+    total_reward: 0,
+  },
+  recent: [],
 };

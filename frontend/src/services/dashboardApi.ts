@@ -7,9 +7,11 @@ import type {
   MarketPoint,
   NewsSentiment,
   PortfolioSummary,
+  RlCostSummary,
   RegimeData,
   SessionStartResponse,
   SignalEvent,
+  StrategyDiagnostics,
   Trade,
   WarmupData,
 } from "../types/dashboard";
@@ -37,7 +39,10 @@ export const dashboardApi = {
   marketHistory: (symbol: string) =>
     fetchJson<MarketPoint[]>(`${API_BASE}/market/history?symbol=${encodeURIComponent(symbol)}`),
   portfolioSummary: () => fetchJson<PortfolioSummary>(`${API_BASE}/portfolio/summary`),
-  intent: () => fetchJson<IntentData>(`${API_BASE}/intent`),
+  intent: (mode?: string) =>
+    fetchJson<IntentData>(
+      `${API_BASE}/intent${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
   signals: (symbol: string, limit = 60) =>
     fetchJson<SignalEvent[]>(
       `${API_BASE}/signals/history?symbol=${encodeURIComponent(symbol)}&limit=${limit}`,
@@ -49,6 +54,11 @@ export const dashboardApi = {
   logs: (lines = 60) => fetchJson<{ logs: string[] }>(`${API_BASE}/logs?lines=${lines}`),
   llmSummary: () => fetchJson<LlmSummary>(`${API_BASE}/llm/summary`),
   llmBreakdown: () => fetchJson<LlmBreakdown>(`${API_BASE}/llm/breakdown`),
+  rlCost: () => fetchJson<RlCostSummary>(`${API_BASE}/rl/cost`),
+  strategyDiagnostics: (symbol: string, mode: string) =>
+    fetchJson<StrategyDiagnostics>(
+      `${API_BASE}/strategy/diagnostics?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`,
+    ),
   newsSentiment: (symbol: string) =>
     fetchJson<NewsSentiment>(`${API_BASE}/news/sentiment?symbol=${encodeURIComponent(symbol)}`),
 };

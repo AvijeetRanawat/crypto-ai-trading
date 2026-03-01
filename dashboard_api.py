@@ -8,7 +8,7 @@ import os
 import json
 from datetime import datetime
 from config import config
-from news_sentiment import build_sentiment_snapshot, summarize_sentiment_with_openai
+from news_sentiment import build_sentiment_snapshot, summarize_sentiment_with_llm
 from database import save_llm_usage
 from logger import logger
 
@@ -26,6 +26,25 @@ import time
 SESSION_START = datetime.now().isoformat()
 SESSION_START_MS = int(time.time() * 1000)
 SESSION_ID = database.get_runtime_context()["session_id"]
+GLOBAL_STRATEGY_DECISION_SOURCES = (
+    "DIRECTIONAL_EDGE_REJECT",
+    "DETERMINISTIC_NEUTRAL",
+    "REGIME_CHOPPY_SKIP",
+    "REGIME_MISMATCH",
+    "SENTIMENT_REJECT",
+    "HTF_REJECT",
+    "DIRECTION_BLOCK",
+    "POST_CLOSE_COOLDOWN",
+    "ENTRY_LOCKOUT",
+    "DUPLICATE_BLOCK",
+    "EDGE_REJECT",
+    "LLM_BUDGET_BLOCK",
+    "LLM_THROTTLED",
+    "LLM_AGENT_UNAVAILABLE",
+    "LLM_REJECT",
+    "RISK_CAP_BLOCK",
+    "POSITION_SIZE_TOO_SMALL",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -34,6 +53,11 @@ def _db():
     conn = sqlite3.connect(database.DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _table_columns(cursor, table: str) -> set[str]:
+    cursor.execute(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in cursor.fetchall()}
 
 
 @app.middleware("http")
@@ -119,8 +143,8 @@ async def session_start():
 
 @app.get("/api/warmup")
 async def get_warmup(symbol: str = "BTCUSDT"):
-    """Return warmup progress: how many price ticks collected vs the 35 needed."""
-    MIN_TICKS = 35
+    """Return warmup progress: how many price ticks collected vs required ticks."""
+    MIN_TICKS = max(5, int(config.WARMUP_MIN_TICKS))
     symbol = str(symbol).upper()
     if not config.is_symbol_allowed(symbol):
         symbol = "BTCUSDT"
@@ -318,8 +342,8 @@ async def get_lessons():
 
 
 @app.get("/api/intent")
-async def get_intent():
-    intent = database.get_intent()
+async def get_intent(mode: str = None):
+    intent = database.get_intent(mode)
     if not intent:
         return {"message": "Scanning markets...", "targets": []}
     try:
@@ -368,6 +392,152 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
         }
         for r in reversed(rows)
     ]
+
+
+@app.get("/api/strategy/diagnostics")
+async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", limit: int = 8):
+    """Mode-aware strategy diagnostics for the right panel."""
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
+
+    mode = str(mode or "SPOT").upper()
+    if mode not in {"SPOT", "FUTURES", "OPTIONS"}:
+        mode = "SPOT"
+
+    safe_limit = max(3, min(20, int(limit)))
+    mode_prefix = f"{mode}_%"
+    mode_and_global_filter = (
+        "COALESCE(decision_source, '') LIKE ? "
+        f"OR COALESCE(decision_source, '') IN ({','.join('?' for _ in GLOBAL_STRATEGY_DECISION_SOURCES)})"
+    )
+    mode_and_global_params = (mode_prefix, *GLOBAL_STRATEGY_DECISION_SOURCES)
+
+    conn = _db()
+    cur = conn.cursor()
+    signal_cols = _table_columns(cur, "signal_events")
+    confidence_expr = "0"
+    if "deterministic_conf" in signal_cols and "claude_conf" in signal_cols:
+        confidence_expr = "COALESCE(deterministic_conf, claude_conf, 0)"
+    elif "deterministic_conf" in signal_cols:
+        confidence_expr = "COALESCE(deterministic_conf, 0)"
+    elif "claude_conf" in signal_cols:
+        confidence_expr = "COALESCE(claude_conf, 0)"
+    action_expr = "deterministic_action" if "deterministic_action" in signal_cols else "NULL"
+
+    cur.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN outcome='TRADED' THEN 1 ELSE 0 END) AS traded,
+            SUM(CASE WHEN outcome='MISSED' THEN 1 ELSE 0 END) AS missed
+        FROM signal_events
+        WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        AND ({mode_and_global_filter})
+        """,
+        (symbol, SESSION_START, SESSION_ID, *mode_and_global_params),
+    )
+    signal_stats = cur.fetchone()
+    total_signals = int((signal_stats[0] or 0) if signal_stats else 0)
+    traded_signals = int((signal_stats[1] or 0) if signal_stats else 0)
+    missed_signals = int((signal_stats[2] or 0) if signal_stats else 0)
+    skipped_signals = max(0, total_signals - traded_signals - missed_signals)
+
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+            COALESCE(AVG(COALESCE(pnl, 0)), 0) AS avg_pnl,
+            COALESCE(SUM(COALESCE(pnl, 0)), 0) AS total_pnl
+        FROM trades
+        WHERE symbol=? AND status='CLOSED' AND entry_time >= ?
+        AND (session_id = ? OR session_id IS NULL)
+        AND COALESCE(decision_source, '') LIKE ?
+        """,
+        (symbol, SESSION_START, SESSION_ID, mode_prefix),
+    )
+    trade_stats = cur.fetchone()
+    closed_trades = int((trade_stats[0] or 0) if trade_stats else 0)
+    wins = int((trade_stats[1] or 0) if trade_stats else 0)
+    avg_pnl = float((trade_stats[2] or 0.0) if trade_stats else 0.0)
+    total_pnl = float((trade_stats[3] or 0.0) if trade_stats else 0.0)
+    win_rate = (wins / closed_trades * 100.0) if closed_trades else 0.0
+
+    cur.execute(
+        f"""
+        SELECT
+            timestamp,
+            outcome,
+            decision_source,
+            {action_expr} AS deterministic_action,
+            {confidence_expr} AS confidence,
+            buy_votes,
+            sell_votes
+        FROM signal_events
+        WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        AND ({mode_and_global_filter})
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (symbol, SESSION_START, SESSION_ID, *mode_and_global_params, safe_limit),
+    )
+    recent_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT reason
+        FROM trades
+        WHERE symbol=? AND entry_time >= ? AND (session_id = ? OR session_id IS NULL)
+        AND COALESCE(decision_source, '') LIKE ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (symbol, SESSION_START, SESSION_ID, mode_prefix),
+    )
+    latest_reason_row = cur.fetchone()
+    conn.close()
+
+    def _mode_note(active_mode: str) -> str:
+        if active_mode == "FUTURES":
+            return "Leverage-aware directional scoring with stricter risk and confidence gates."
+        if active_mode == "OPTIONS":
+            return "Volatility + structure fit to choose spread/volatility strategies, otherwise skip."
+        return "Long-biased spot entries focused on trend quality and selective pullback/breakout setups."
+
+    recent_decisions = [
+        {
+            "timestamp": r[0],
+            "outcome": r[1],
+            "decision_source": r[2],
+            "action": r[3] or "-",
+            "confidence": float(r[4] or 0.0),
+            "buy_votes": int(r[5] or 0),
+            "sell_votes": int(r[6] or 0),
+        }
+        for r in recent_rows
+    ]
+
+    return {
+        "symbol": symbol,
+        "mode": mode,
+        "strategy_note": _mode_note(mode),
+        "session_signals": {
+            "total": total_signals,
+            "traded": traded_signals,
+            "missed": missed_signals,
+            "skipped": skipped_signals,
+        },
+        "session_trades": {
+            "closed": closed_trades,
+            "wins": wins,
+            "win_rate": round(win_rate, 2),
+            "avg_pnl": round(avg_pnl, 4),
+            "total_pnl": round(total_pnl, 4),
+        },
+        "latest_trade_reason": (latest_reason_row[0] if latest_reason_row else "").strip(),
+        "recent_decisions": list(reversed(recent_decisions)),
+    }
 
 
 @app.get("/api/llm/summary")
@@ -476,6 +646,73 @@ async def get_llm_breakdown():
     }
 
 
+@app.get("/api/rl/cost")
+async def get_rl_cost():
+    """RL opportunity-cost summary for session/today/all-time."""
+    conn = _db()
+    cur = conn.cursor()
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    def _agg(where_clause: str, params: tuple):
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*) AS events,
+                COALESCE(SUM(CASE WHEN event_type='SKIP_OPPORTUNITY' THEN penalty ELSE 0 END), 0) AS skip_penalty,
+                COALESCE(SUM(CASE WHEN event_type='TRADE_CLOSE_REWARD' THEN penalty ELSE 0 END), 0) AS hold_penalty,
+                COALESCE(SUM(penalty), 0) AS total_penalty,
+                COALESCE(SUM(reward), 0) AS total_reward
+            FROM rl_events
+            WHERE {where_clause}
+            """,
+            params,
+        )
+        row = cur.fetchone()
+        return {
+            "events": int(row[0] or 0),
+            "skip_penalty": round(float(row[1] or 0.0), 6),
+            "hold_penalty": round(float(row[2] or 0.0), 6),
+            "total_penalty": round(float(row[3] or 0.0), 6),
+            "total_reward": round(float(row[4] or 0.0), 6),
+        }
+
+    session = _agg("timestamp >= ? AND (session_id = ? OR session_id IS NULL)", (SESSION_START, SESSION_ID))
+    today = _agg("timestamp >= ?", (midnight,))
+    all_time = _agg("1=1", ())
+
+    cur.execute(
+        """
+        SELECT timestamp, event_type, mode, symbol, profile_id, reason, reward, penalty
+        FROM rl_events
+        WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        ORDER BY id DESC
+        LIMIT 8
+        """,
+        (SESSION_START, SESSION_ID),
+    )
+    recent_rows = cur.fetchall()
+    conn.close()
+
+    return {
+        "session": session,
+        "today": today,
+        "all_time": all_time,
+        "recent": [
+            {
+                "timestamp": r[0],
+                "event_type": r[1],
+                "mode": r[2],
+                "symbol": r[3],
+                "profile_id": r[4],
+                "reason": r[5],
+                "reward": round(float(r[6] or 0.0), 6),
+                "penalty": round(float(r[7] or 0.0), 6),
+            }
+            for r in recent_rows
+        ],
+    }
+
+
 @app.get("/api/regime")
 async def get_regime(symbol: str = "BTCUSDT"):
     """Run regime/ATR/session snapshot from latest prices in DB."""
@@ -504,10 +741,11 @@ async def get_regime(symbol: str = "BTCUSDT"):
             "session_verdict": session["verdict"],
         }
 
-    if len(rows) < 30:
+    min_regime_ticks = max(5, int(config.WARMUP_MIN_TICKS))
+    if len(rows) < min_regime_ticks:
         return {
             "regime": "WARMING_UP", "strength": 0,
-            "verdict": f"Warming up ({len(rows)}/30 prices collected)",
+            "verdict": f"Warming up ({len(rows)}/{min_regime_ticks} prices collected)",
             "atr_sl": 0.004, "atr_tp": 0.008, "atr_verdict": "ATR: warming up",
             "session": session["session"],
             "session_quality": session["quality"],
@@ -545,19 +783,47 @@ async def get_news_sentiment(symbol: str = "BTCUSDT"):
         cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
         symbol=symbol,
     )
+    if not bool(config.ENABLE_NEWS_LLM_SUMMARY):
+        snapshot["llm_summary"] = {
+            "text": "LLM summary disabled.",
+            "model_id": "-",
+            "timestamp": datetime.now().isoformat(),
+            "cached": True,
+        }
+        return snapshot
     try:
-        snapshot, usage_event = summarize_sentiment_with_openai(
+        provider = str(config.LLM_PROVIDER).upper()
+        summary_model = (
+            config.BEDROCK_MODEL_ID
+            if provider == "BEDROCK"
+            else config.OPENAI_NEWS_SUMMARY_MODEL_ID
+        )
+        summary_model_lower = str(summary_model or "").lower()
+        bedrock_is_haiku = "haiku" in summary_model_lower
+        input_price = (
+            (config.HAIKU_INPUT_USD_PER_1M if bedrock_is_haiku else config.SONNET_INPUT_USD_PER_1M)
+            if provider == "BEDROCK"
+            else config.OPENAI_NEWS_SUMMARY_INPUT_USD_PER_1M
+        )
+        output_price = (
+            (config.HAIKU_OUTPUT_USD_PER_1M if bedrock_is_haiku else config.SONNET_OUTPUT_USD_PER_1M)
+            if provider == "BEDROCK"
+            else config.OPENAI_NEWS_SUMMARY_OUTPUT_USD_PER_1M
+        )
+        snapshot, usage_event = summarize_sentiment_with_llm(
             snapshot,
+            provider=provider,
+            model_id=summary_model,
             openai_api_key=config.OPENAI_API_KEY,
             openai_base_url=config.OPENAI_BASE_URL,
-            model_id=config.OPENAI_NEWS_SUMMARY_MODEL_ID,
-            input_price_per_1m=config.OPENAI_NEWS_SUMMARY_INPUT_USD_PER_1M,
-            output_price_per_1m=config.OPENAI_NEWS_SUMMARY_OUTPUT_USD_PER_1M,
+            aws_region=config.AWS_DEFAULT_REGION,
+            input_price_per_1m=input_price,
+            output_price_per_1m=output_price,
         )
         if usage_event:
             save_llm_usage(
                 stage=usage_event.get("stage", "news_sentiment_summary"),
-                model_id=usage_event.get("model_id", config.OPENAI_NEWS_SUMMARY_MODEL_ID),
+                model_id=usage_event.get("model_id", summary_model),
                 input_tokens=int(usage_event.get("input_tokens", 0)),
                 output_tokens=int(usage_event.get("output_tokens", 0)),
                 total_tokens=int(usage_event.get("total_tokens", 0)),
@@ -570,7 +836,7 @@ async def get_news_sentiment(symbol: str = "BTCUSDT"):
         logger.error(f"News sentiment summary failed for {symbol}: {e}", exc_info=True)
         snapshot["llm_summary"] = {
             "text": f"LLM summary unavailable: {e}",
-            "model_id": config.OPENAI_NEWS_SUMMARY_MODEL_ID,
+            "model_id": config.BEDROCK_MODEL_ID if str(config.LLM_PROVIDER).upper() == "BEDROCK" else config.OPENAI_NEWS_SUMMARY_MODEL_ID,
             "timestamp": datetime.now().isoformat(),
             "cached": True,
         }

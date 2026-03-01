@@ -9,6 +9,7 @@ import type {
   NewsSentiment,
   RegimeData,
   SignalEvent,
+  StrategyDiagnostics,
 } from "../types/dashboard";
 import { formatNum } from "../utils/format";
 import { TOTAL_VOTES } from "../utils/constants";
@@ -21,6 +22,7 @@ interface RightPanelProps {
   llmSummary: LlmSummary;
   llmBreakdown: LlmBreakdown;
   newsSentiment: NewsSentiment;
+  strategyDiagnostics: StrategyDiagnostics;
   lessons: Lesson[];
 }
 
@@ -58,6 +60,7 @@ export function RightPanel({
   llmSummary,
   llmBreakdown,
   newsSentiment,
+  strategyDiagnostics,
   lessons,
 }: RightPanelProps) {
   const [llmExpanded, setLlmExpanded] = useState(false);
@@ -140,6 +143,57 @@ export function RightPanel({
         </div>
       </div>
 
+      <div className="panel-section glass strategy-panel">
+        <div className="section-header">
+          <span>STRATEGY THINKING · {strategyDiagnostics.mode}</span>
+        </div>
+        <div className="intent-text">{strategyDiagnostics.strategy_note}</div>
+        <div className="llm-usage-grid strategy-metrics">
+          <div className="llm-usage-row">
+            <span className="llm-usage-label">Signals</span>
+            <span className="llm-usage-value mono">{strategyDiagnostics.session_signals.total}</span>
+          </div>
+          <div className="llm-usage-row">
+            <span className="llm-usage-label">Traded / Missed / Skipped</span>
+            <span className="llm-usage-value mono">
+              {strategyDiagnostics.session_signals.traded} / {strategyDiagnostics.session_signals.missed} / {strategyDiagnostics.session_signals.skipped}
+            </span>
+          </div>
+          <div className="llm-usage-row">
+            <span className="llm-usage-label">Win Rate</span>
+            <span className="llm-usage-value mono">{strategyDiagnostics.session_trades.win_rate.toFixed(1)}%</span>
+          </div>
+          <div className="llm-usage-row">
+            <span className="llm-usage-label">Total PnL</span>
+            <span className={`llm-usage-value mono ${strategyDiagnostics.session_trades.total_pnl >= 0 ? "positive" : "negative"}`}>
+              {strategyDiagnostics.session_trades.total_pnl.toFixed(2)}
+            </span>
+          </div>
+        </div>
+        <div className="sentiment-subsection-title">Recent Decisions</div>
+        <div className="strategy-recent-list">
+          {!strategyDiagnostics.recent_decisions.length && (
+            <div className="empty-state">No {strategyDiagnostics.mode} decisions yet for {strategyDiagnostics.symbol}</div>
+          )}
+          {strategyDiagnostics.recent_decisions.map((decision) => (
+            <div className="strategy-recent-item" key={`${decision.timestamp}-${decision.decision_source}-${decision.outcome}`}>
+              <span className="mono strategy-recent-head">
+                {decision.action} · {decision.confidence.toFixed(2)} · {decision.buy_votes}B/{decision.sell_votes}S
+              </span>
+              <span className="strategy-recent-sub">
+                {decision.outcome} · {decision.decision_source}
+              </span>
+            </div>
+          ))}
+        </div>
+        {!!strategyDiagnostics.latest_trade_reason && (
+          <div className="strategy-reason">
+            <span className="llm-usage-label">Last Trade Rationale</span>
+            <div>{strategyDiagnostics.latest_trade_reason}</div>
+          </div>
+        )}
+      </div>
+
       <div className="panel-section glass sentiment-panel">
         <div className="section-header llm-header">
           <span>MARKET SENTIMENT & NEWS</span>
@@ -161,6 +215,7 @@ export function RightPanel({
           <span>News Items: {newsSentiment.components.articles_count}</span>
           <span>Updated: {newsSentiment.updated_at ? "live" : "-"}</span>
         </div>
+        {/* GPT summary disabled per request.
         <div className="llm-summary-box">
           <div className="llm-summary-head">
             <span>GPT Summary</span>
@@ -170,6 +225,7 @@ export function RightPanel({
             {newsSentiment.llm_summary?.text || "Summary pending..."}
           </div>
         </div>
+        */}
         <div className="sentiment-subsection-title">Latest News + Sentiment</div>
         <div className="news-list">
           {!newsSentiment.articles.length && <div className="empty-state">No news data yet</div>}

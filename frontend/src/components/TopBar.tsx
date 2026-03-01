@@ -1,16 +1,27 @@
 import type { PortfolioSummary } from "../types/dashboard";
 import type { ThemeMode } from "../hooks/useTheme";
 import { formatUsd } from "../utils/format";
+import { TRADING_MODES, type TradingMode } from "../utils/constants";
 
 interface TopBarProps {
   theme: ThemeMode;
   onToggleTheme: () => void;
+  tradingMode: TradingMode;
+  onTradingModeChange: (mode: TradingMode) => void;
   summary: PortfolioSummary;
   balance: number;
   uptime: string;
 }
 
-export function TopBar({ theme, onToggleTheme, summary, balance, uptime }: TopBarProps) {
+export function TopBar({
+  theme,
+  onToggleTheme,
+  tradingMode,
+  onTradingModeChange,
+  summary,
+  balance,
+  uptime,
+}: TopBarProps) {
   const pnlClass = summary.total_pnl >= 0 ? "positive" : "negative";
 
   return (
@@ -18,7 +29,19 @@ export function TopBar({ theme, onToggleTheme, summary, balance, uptime }: TopBa
       <div className="topbar-left">
         <div className="dot-live" />
         <span className="brand-name">AI Trading Terminal</span>
-        <span className="mode-badge">SIMULATION · React TS</span>
+        <span className="mode-badge">SIMULATION · {tradingMode}</span>
+        <div className="trading-mode-tabs">
+          {TRADING_MODES.map((mode) => (
+            <button
+              key={mode}
+              className={`trading-mode-tab ${tradingMode === mode ? "active" : ""}`}
+              type="button"
+              onClick={() => onTradingModeChange(mode)}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="topbar-right">
         <button

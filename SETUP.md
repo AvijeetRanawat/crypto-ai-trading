@@ -65,6 +65,39 @@ BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-6
 HAIKU_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
+### Optional Free Local LLM (Apple Silicon)
+
+```bash
+pip install llama-cpp-python
+```
+
+1. Download a quantized Llama-style binary (for example `phi-3-mini-ggml-q4_0.bin` or `gemma-2b-gguf-q4_0`) to `~/models/`.
+2. Update `.env`:
+   ```dotenv
+   LOCAL_LLM_ENABLED=true
+   LOCAL_LLM_MODEL_PATH=/Users/you/models/phi-3-mini-ggml-q4_0.bin
+   LOCAL_LLM_MODEL_NAME=phi-3-mini-q4
+   LOCAL_LLM_TEMPERATURE=0.1
+   LOCAL_LLM_MAX_TOKENS=200
+   ```
+3. The backend will now call the local quantized model (via `llama_cpp`) for sentiment summaries instead of paid APIs.
+
+This keeps inference entirely free and works well on M1/M2 MacBooks because the weights are <1.5 GB and the `llama-cpp` backend uses native Metal acceleration.
+
+### Optional MLX Deep RL (Apple Silicon)
+
+```bash
+pip install mlx
+```
+
+```dotenv
+ENABLE_MLX_RL_AGENT=true
+RL_MLX_LEARNING_RATE=0.05
+RL_MLX_HIDDEN_SIZE=16
+```
+
+This swaps the RL weight selector to a tiny MLX MLP contextual bandit running locally.
+
 ## 4. Start the App
 
 Build the frontend first:
