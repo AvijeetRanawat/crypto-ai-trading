@@ -805,6 +805,7 @@ body {
     flex-direction: column;
     gap: 0.45rem;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
 }
 
 .llm-modal-header {
@@ -836,6 +837,13 @@ body {
     border-top: 0;
     padding-top: 0;
     max-height: calc(88vh - 84px);
+}
+
+.llm-modal-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0.2rem;
 }
 
 /* ── SENTIMENT PANEL ── */
@@ -1125,6 +1133,40 @@ body {
     color: var(--muted);
 }
 
+.rl-profile-map {
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+    margin-top: 0.2rem;
+}
+
+.rl-profile-map-title {
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+}
+
+.rl-map-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.rl-map-pill {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 9px;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.rl-map-empty {
+    color: var(--muted);
+    font-size: 9px;
+}
+
 .rl-learned-list {
     margin-top: 0.25rem;
 }
@@ -1256,8 +1298,8 @@ body {
 }
 
 ::-webkit-scrollbar {
-    width: 3px;
-    height: 3px;
+    width: 8px;
+    height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -1265,8 +1307,14 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.28);
     border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
 
 /* ── ENGINE v6 ADDITIONS ─────────────────────────────────────────────────── */

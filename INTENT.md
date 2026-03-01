@@ -314,7 +314,10 @@ Dashboard sections expose:
 - LLM token/cost usage (aggregate + model breakdown)
 - lessons learned
 - system logs
-- RL Agent card with modal breakdown of learned Q/N and profile weights
+- RL Agent card with expand modal and mode tabs (`SPOT`, `FUTURES`, `OPTIONS`)
+  - per-profile controls: `size_mult`, `leverage_mult`, `confidence_bias`, `sentiment_gate_mult`
+  - full multiplier maps: `voter_weight_mult` (8 vote parameters) and `weight_mult` (strategy factors)
+  - learned RL tables per state: profile `q` and `n` counts
 
 RL observability APIs:
 
