@@ -1961,6 +1961,16 @@ class TradingEngine:
                             vote_weights=rl_vote_inf.get("voter_weight_mult", {}),
                         )
                         min_pro_needed_weighted = min_pro_needed * (total_vote_weight / 8.0)
+                        skip_streak = int(self.skipped_cycles_by_mode.get(active_mode, 0))
+                        skip_pressure = max(
+                            0.0,
+                            min(
+                                float(config.RL_SKIP_PRESSURE_MAX),
+                                float(skip_streak - int(config.RL_SKIP_PRESSURE_START)) * float(config.RL_SKIP_PRESSURE_STEP),
+                            ),
+                        )
+                        if skip_pressure > 0:
+                            min_pro_needed_weighted = max(1.0, min_pro_needed_weighted * (1.0 - skip_pressure))
 
                         # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
                         if buy_count < min_pro_needed_weighted and sell_count < min_pro_needed_weighted:
@@ -1991,6 +2001,8 @@ class TradingEngine:
                         # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
                         # Quality enforced by confidence floor (0.70) + duplicate blocker (120s)
                         dir_threshold = 2.0 * (total_vote_weight / 8.0)
+                        if skip_pressure > 0:
+                            dir_threshold = max(1.0, dir_threshold * (1.0 - (skip_pressure * 0.85)))
                         if sell_count >= dir_threshold and sell_count > buy_count:
                             proposed_dir = "SHORT"
                         elif buy_count >= dir_threshold and buy_count >= sell_count:
@@ -2152,38 +2164,50 @@ class TradingEngine:
                             symbol, proposed_dir, snapshot=sentiment_snapshot
                         )
                         if not sentiment_ok:
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "SENTIMENT_REJECT"),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            self._rl_penalize_skip(
-                                mode=active_mode,
-                                reason="sentiment_reject",
-                                expected_edge_pct=baseline_edge_pct,
-                                symbol=symbol,
-                                regime_result=regime_result,
-                                session_filt=session_filt,
-                                vol_result=vol_result,
-                                sentiment_snapshot=sentiment_snapshot,
-                                buy_count=buy_count,
-                                sell_count=sell_count,
-                                total_vote_weight=total_vote_weight,
-                            )
-                            continue
+                            if (
+                                skip_pressure > 0
+                                and baseline_edge_pct >= float(config.RL_SKIP_PRESSURE_EDGE_MIN)
+                                and max(buy_count, sell_count) >= dir_threshold
+                            ):
+                                intent(
+                                    f"⚡ Skip-pressure override: bypassing sentiment gate ({skip_pressure:.2f}) for learning.",
+                                    [symbol],
+                                )
+                                sentiment_ok = True
+                                sentiment_verdict = f"{sentiment_verdict} | override:{skip_pressure:.2f}"
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "SENTIMENT_REJECT"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="sentiment_reject",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=sentiment_snapshot,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
+                                )
+                                continue
 
                         # ── v6: ATR-BASED DYNAMIC STOPS ────────────────────
                         atr_result = self._safe_tool_call(

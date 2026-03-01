@@ -295,8 +295,27 @@ class RLWeightAgent:
                 profile_id = random.choice(profile_ids)
                 decision_type = "explore"
             else:
-                profile_id = max(profile_ids, key=lambda p: float(q_mode.get(p, 0.0)))
-                decision_type = "exploit"
+                # If this exact state is cold/flat, transfer learning from mode-level profile averages.
+                if all(abs(float(q_mode.get(pid, 0.0))) < 1e-9 for pid in profile_ids):
+                    q_tables = self.state["q"].get(mode, {})
+                    n_tables = self.state["n"].get(mode, {})
+                    global_scores = {}
+                    for pid in profile_ids:
+                        weighted_sum = 0.0
+                        weight_total = 0.0
+                        for state, q_row in q_tables.items():
+                            n_row = n_tables.get(state, {})
+                            n = float(n_row.get(pid, 0) or 0)
+                            if n <= 0:
+                                continue
+                            weighted_sum += float(q_row.get(pid, 0.0) or 0.0) * n
+                            weight_total += n
+                        global_scores[pid] = (weighted_sum / weight_total) if weight_total > 0 else 0.0
+                    profile_id = max(profile_ids, key=lambda p: float(global_scores.get(p, 0.0)))
+                    decision_type = "exploit_global"
+                else:
+                    profile_id = max(profile_ids, key=lambda p: float(q_mode.get(p, 0.0)))
+                    decision_type = "exploit"
 
             profile = mode_profiles.get(profile_id, {"weight_mult": {}, "size_mult": 1.0, "confidence_bias": 0.0})
             return {

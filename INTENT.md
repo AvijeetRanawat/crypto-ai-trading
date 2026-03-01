@@ -221,7 +221,29 @@ The RL layer makes the system less static by learning which weight profile works
 - Reward:
   - realized trade PnL normalized by notional (profit positive, loss negative)
   - minus open-trade opportunity cost penalty
-  - plus small penalties for rejected high-edge opportunities
+  - plus skip penalties for rejected high-edge opportunities (with configurable floor/cap)
+
+## Skip-Pressure Adaptation
+
+To avoid getting stuck in long skip streaks, the engine now adds a mode-local
+**skip pressure** term:
+
+- starts after `RL_SKIP_PRESSURE_START` consecutive skips
+- grows by `RL_SKIP_PRESSURE_STEP` per additional skip
+- capped by `RL_SKIP_PRESSURE_MAX`
+
+Skip pressure gradually relaxes:
+
+- setup threshold (`min_pro_needed_weighted`)
+- directional threshold (`dir_threshold`)
+
+And can conditionally override sentiment rejection when:
+
+- skip pressure is active
+- baseline edge is above `RL_SKIP_PRESSURE_EDGE_MIN`
+- weighted directional support still clears threshold
+
+This keeps the system aggressive enough to keep learning while preserving edge-quality constraints.
 
 ## Exploration vs Exploitation
 
@@ -229,6 +251,9 @@ The RL layer makes the system less static by learning which weight profile works
   - explores with probability `RL_EPSILON`
   - decays toward `RL_MIN_EPSILON` by `RL_EPSILON_DECAY`
 - Learning rate controlled by `RL_LEARNING_RATE`
+- For cold/unseen states with flat Q-values, exploitation can use mode-level
+  profile averages (transfer from previously learned states) before defaulting
+  to random exploration.
 
 ## Persistence
 

@@ -75,8 +75,11 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
         return
     edge_norm = max(0.0, float(expected_edge_pct or 0.0)) / max(float(config.MIN_EXPECTED_EDGE_PCT), 0.001)
     raw_penalty = float(config.RL_OPPORTUNITY_COST_PENALTY) * min(2.5, 0.5 + edge_norm)
-    penalty_cap = rl_loss_penalty_cap()
-    penalty = min(abs(raw_penalty), penalty_cap)
+    penalty_cap = max(
+        float(config.RL_SKIP_PENALTY_FLOOR),
+        min(float(config.RL_SKIP_PENALTY_CAP), max(float(config.EARLY_STOP_LOSS_PCT), 0.05)),
+    )
+    penalty = max(float(config.RL_SKIP_PENALTY_FLOOR), min(abs(raw_penalty), penalty_cap))
     reward = -abs(penalty)
     engine.rl_agent.update(mode, state_key, profile_id, reward)
     save_rl_event(
