@@ -7,6 +7,7 @@ This guide walks through a clean local setup for the project.
 - macOS/Linux shell
 - Python 3.10+ (project currently runs with modern Python 3)
 - Network access for `pip install` (PyPI)
+- Node.js 18+ and npm (for Vite frontend build)
 
 ## 2. Create Virtual Environment
 
@@ -57,7 +58,18 @@ HAIKU_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 
 ## 4. Start the App
 
+Build the frontend first:
+
 ```bash
+cd /Users/tanmaydas/dev/crypto-ai-trading/frontend
+npm install
+npm run build
+```
+
+Then start backend+engine:
+
+```bash
+cd /Users/tanmaydas/dev/crypto-ai-trading
 python run.py
 ```
 
@@ -67,6 +79,10 @@ python run.py
 
 Open in browser:
 - `http://localhost:8000`
+
+Frontend note:
+- React + TypeScript source is under `frontend/src`.
+- FastAPI serves compiled assets from `static/dist`.
 
 ## 5. Verify It Is Working
 
@@ -81,6 +97,7 @@ You can also hit APIs directly:
 curl http://localhost:8000/api/session_start
 curl http://localhost:8000/api/portfolio/summary
 curl http://localhost:8000/api/logs?lines=20
+curl http://localhost:8000/api/llm/summary
 ```
 
 ## 6. Stop the App
@@ -115,6 +132,21 @@ If an old lock exists:
 - Confirm `python run.py` is still running
 - Verify no port conflict on `8000`
 - Try `http://127.0.0.1:8000`
+- Ensure frontend has been built: `cd frontend && npm run build`
+- Open browser devtools console for React/runtime errors
+
+### Frontend local dev mode
+
+You can run Vite dev server separately:
+
+```bash
+cd /Users/tanmaydas/dev/crypto-ai-trading/frontend
+npm install
+npm run dev
+```
+
+- Vite runs on `http://localhost:5173`
+- `/api` is proxied to `http://localhost:8000` (configured in `vite.config.ts`)
 
 ## 8. Running Tests
 

@@ -8,7 +8,7 @@ Algorithmic + LLM-assisted crypto trading engine with:
 
 The app runs two processes together:
 - Trading engine loop
-- FastAPI dashboard backend with static frontend
+- FastAPI dashboard backend with React frontend (served from `static/`)
 
 Default dashboard URL: `http://localhost:8000`
 
@@ -65,6 +65,41 @@ Open:
 
 Important: each `python run.py` starts a fresh session and clears transient session data while preserving lessons/rules.
 
+## Frontend Architecture
+
+The dashboard UI is React + TypeScript built with Vite:
+
+- Source app: [`frontend/src/App.tsx`](./frontend/src/App.tsx)
+- Entry point: [`frontend/src/main.tsx`](./frontend/src/main.tsx)
+- Vite config: [`frontend/vite.config.ts`](./frontend/vite.config.ts)
+- Styles: [`frontend/src/style.css`](./frontend/src/style.css)
+
+Runtime model:
+- Build with Vite into `static/dist`
+- UI calls backend API routes under `/api/*`
+- FastAPI serves compiled assets from `static/dist` (fallback to `static/` if dist is missing)
+
+Charts:
+- Lightweight Charts for price/signal charts
+- Chart.js for trade performance bars
+
+## Frontend Commands
+
+From `frontend/`:
+
+```bash
+npm install
+npm run dev
+```
+
+Build production assets for FastAPI:
+
+```bash
+npm run build
+```
+
+This writes compiled files to `static/dist`.
+
 ## Configuration
 
 Primary configuration is in:
@@ -108,6 +143,12 @@ Core endpoints:
 
 Static frontend is mounted at `/` from the `static/` directory.
 
+`/api/llm/summary` includes persistent token/call usage fields:
+- `llm_tokens_session`
+- `llm_tokens_today`
+- `llm_tokens_all_time`
+- `llm_calls_all_time`
+
 ## Data and Storage
 
 SQLite DB: `trading_data.db`
@@ -145,6 +186,10 @@ Additional utility scripts:
   - Ensure `BINANCE_REST_BASE_URL=https://api.binance.us`
 - Existing lock error from `run.pid`:
   - Stop old process or remove stale `run.pid` if process no longer exists
+- Frontend appears blank or stale:
+  - Hard refresh the browser
+  - Ensure `npm run build` has been run at least once for `static/dist`
+  - Check browser console for runtime errors
 
 ## Security Notes
 

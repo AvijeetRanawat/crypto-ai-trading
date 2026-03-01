@@ -4,6 +4,7 @@
    ════════════════════════════════════════════════════════════════════════════ */
 
 const API = "/api";
+const THEME_KEY = "dashboard-theme";
 let priceChart = null, priceSeries = null;
 let signalChart = null, buySeries = null, sellSeries = null;
 let perfChart = null;
@@ -14,8 +15,77 @@ let lastLogLength = 0;
 let lastTradeCount = 0;
 let warmupDone = false;
 
+function getThemeTokens() {
+    const css = getComputedStyle(document.documentElement);
+    return {
+        chartText: css.getPropertyValue('--chart-text').trim() || '#71717a',
+        chartGrid: css.getPropertyValue('--chart-grid').trim() || 'rgba(255,255,255,0.03)',
+        chartBorder: css.getPropertyValue('--chart-border').trim() || 'rgba(255,255,255,0.08)',
+        chartYTick: css.getPropertyValue('--chart-y-tick').trim() || '#4b5563',
+    };
+}
+
+function updateThemeToggleLabel(theme) {
+    const btn = el('theme-toggle');
+    if (!btn) return;
+    btn.textContent = theme === 'light' ? '🌙 Dark' : '☀ Light';
+}
+
+function applyChartTheme() {
+    const t = getThemeTokens();
+    if (priceChart) {
+        priceChart.applyOptions({
+            layout: { background: { type: 'solid', color: 'transparent' }, textColor: t.chartText },
+            grid: { vertLines: { color: t.chartGrid }, horzLines: { color: t.chartGrid } },
+            rightPriceScale: { borderColor: t.chartBorder },
+            timeScale: { borderColor: t.chartBorder },
+        });
+    }
+    if (signalChart) {
+        signalChart.applyOptions({
+            layout: { background: { type: 'solid', color: 'transparent' }, textColor: t.chartText },
+            grid: { vertLines: { display: false }, horzLines: { color: t.chartGrid } },
+            rightPriceScale: { borderColor: t.chartBorder, scaleMargins: { top: 0.1, bottom: 0.1 } },
+            timeScale: { borderColor: t.chartBorder, timeVisible: true, secondsVisible: false, visible: false },
+        });
+    }
+    if (perfChart) {
+        perfChart.options.scales.y.ticks.color = t.chartYTick;
+        perfChart.options.scales.y.grid.color = t.chartGrid;
+        perfChart.options.scales.y.border.color = t.chartBorder;
+        perfChart.update('none');
+    }
+}
+
+function setTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_KEY, theme);
+    updateThemeToggleLabel(theme);
+    applyChartTheme();
+}
+
+function initTheme() {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') {
+        setTheme(saved);
+        return;
+    }
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    setTheme(prefersDark ? 'dark' : 'light');
+}
+
+function initThemeToggle() {
+    const btn = el('theme-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+        setTheme(current === 'light' ? 'dark' : 'light');
+    });
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function initCharts() {
+    const t = getThemeTokens();
     // 1. LightweightCharts — Price (always visible, never cleared between ticks)
     const container = document.getElementById('priceChart');
     const h = container.parentElement.clientHeight - 56;
@@ -24,10 +94,10 @@ function initCharts() {
     priceChart = LightweightCharts.createChart(container, {
         width: container.clientWidth,
         height: +container.style.height.replace('px', ''),
-        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#71717a' },
-        grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)' },
-        timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true, secondsVisible: false },
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: t.chartText },
+        grid: { vertLines: { color: t.chartGrid }, horzLines: { color: t.chartGrid } },
+        rightPriceScale: { borderColor: t.chartBorder },
+        timeScale: { borderColor: t.chartBorder, timeVisible: true, secondsVisible: false },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     });
 
@@ -42,10 +112,10 @@ function initCharts() {
     signalChart = LightweightCharts.createChart(signalContainer, {
         width: signalContainer.clientWidth,
         height: 120,
-        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#71717a' },
-        grid: { vertLines: { display: false }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)', scaleMargins: { top: 0.1, bottom: 0.1 } },
-        timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true, secondsVisible: false, visible: false },
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: t.chartText },
+        grid: { vertLines: { display: false }, horzLines: { color: t.chartGrid } },
+        rightPriceScale: { borderColor: t.chartBorder, scaleMargins: { top: 0.1, bottom: 0.1 } },
+        timeScale: { borderColor: t.chartBorder, timeVisible: true, secondsVisible: false, visible: false },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     });
 
@@ -99,9 +169,9 @@ function initCharts() {
             scales: {
                 x: { display: false },
                 y: {
-                    ticks: { color: '#4b5563', callback: v => `$${v}` },
-                    grid: { color: 'rgba(255,255,255,0.04)' },
-                    border: { color: 'rgba(255,255,255,0.06)' }
+                    ticks: { color: t.chartYTick, callback: v => `$${v}` },
+                    grid: { color: t.chartGrid },
+                    border: { color: t.chartBorder }
                 }
             }
         }
@@ -118,6 +188,7 @@ const fmt = (n) => n >= 0
 
 const fmtPct = (n) => (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
 const el = (id) => document.getElementById(id);
+const fmtNum = (n) => Number(n || 0).toLocaleString('en-US');
 
 function setClass(elem, cls) {
     elem.className = elem.className.replace(/\b(positive|negative|neutral|warn)\b/g, '');
@@ -515,6 +586,25 @@ async function updateLogs() {
     } catch (e) { }
 }
 
+// ── LLM TOKEN USAGE ───────────────────────────────────────────────────────────
+async function updateLLMUsagePanel() {
+    try {
+        const res = await fetch(`${API}/llm/summary`);
+        const d = await res.json();
+
+        const sessionEl = el('llm-tokens-session');
+        const todayEl = el('llm-tokens-today');
+        const allTimeEl = el('llm-tokens-all-time');
+        const callsAllEl = el('llm-calls-all-time');
+        if (!sessionEl || !todayEl || !allTimeEl || !callsAllEl) return;
+
+        sessionEl.textContent = fmtNum(d.llm_tokens_session);
+        todayEl.textContent = fmtNum(d.llm_tokens_today);
+        allTimeEl.textContent = fmtNum(d.llm_tokens_all_time);
+        callsAllEl.textContent = fmtNum(d.llm_calls_all_time);
+    } catch (e) { }
+}
+
 // ── MASTER POLL ───────────────────────────────────────────────────────────────
 async function pollAll() {
     await checkFreshStart();
@@ -533,6 +623,7 @@ async function pollSlow() {
         updatePerfChart(),
         updateTrades(),
         updateLessons(),
+        updateLLMUsagePanel(),
         updateLogs(),
     ]);
 }
@@ -572,7 +663,10 @@ function initResizer() {
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+    initTheme();
+    initThemeToggle();
     initCharts();
+    applyChartTheme();
     initResizer();
     setInterval(updateUptime, 1000);
 

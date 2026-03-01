@@ -293,15 +293,30 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
 
 @app.get("/api/llm/summary")
 async def get_llm_summary():
-    """LLM spend and conversion metrics for the current session."""
+    """LLM spend/token metrics for session, today, and all-time persistence."""
     conn = _db()
     cur = conn.cursor()
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
     cur.execute("""
         SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*), COALESCE(SUM(total_tokens),0)
         FROM llm_usage
         WHERE timestamp >= ? AND (session_id = ? OR session_id IS NULL)
     """, (SESSION_START, SESSION_ID))
     cost_session, calls_session, tokens_session = cur.fetchone()
+
+    cur.execute("""
+        SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*), COALESCE(SUM(total_tokens),0)
+        FROM llm_usage
+        WHERE timestamp >= ?
+    """, (midnight,))
+    cost_today, calls_today, tokens_today = cur.fetchone()
+
+    cur.execute("""
+        SELECT COALESCE(SUM(estimated_cost_usd),0), COUNT(*), COALESCE(SUM(total_tokens),0)
+        FROM llm_usage
+    """)
+    cost_all_time, calls_all_time, tokens_all_time = cur.fetchone()
 
     cur.execute("""
         SELECT COUNT(*) FROM llm_usage
@@ -322,6 +337,12 @@ async def get_llm_summary():
         "llm_cost_session": round(cost_session or 0.0, 4),
         "llm_calls_session": int(calls_session or 0),
         "llm_tokens_session": int(tokens_session or 0),
+        "llm_cost_today": round(cost_today or 0.0, 4),
+        "llm_calls_today": int(calls_today or 0),
+        "llm_tokens_today": int(tokens_today or 0),
+        "llm_cost_all_time": round(cost_all_time or 0.0, 4),
+        "llm_calls_all_time": int(calls_all_time or 0),
+        "llm_tokens_all_time": int(tokens_all_time or 0),
         "llm_decision_calls_session": int(decision_calls or 0),
         "traded_signals": int(traded_signals or 0),
         "llm_trade_conversion_rate": round(conversion, 2),
@@ -384,8 +405,13 @@ async def get_regime():
 # ─────────────────────────────────────────────────────────────────────────────
 #  Static frontend
 # ─────────────────────────────────────────────────────────────────────────────
-if os.path.exists("static"):
-    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.join(APP_DIR, "static", "dist")
+LEGACY_STATIC_DIR = os.path.join(APP_DIR, "static")
+if os.path.exists(os.path.join(DIST_DIR, "index.html")):
+    app.mount("/", StaticFiles(directory=DIST_DIR, html=True), name="static")
+elif os.path.exists(LEGACY_STATIC_DIR):
+    app.mount("/", StaticFiles(directory=LEGACY_STATIC_DIR, html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
