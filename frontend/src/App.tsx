@@ -39,6 +39,7 @@ function App() {
     strategyDiagnostics,
     rlCostSummary,
     rlWeights,
+    rlTuning,
   } = useDashboardData(selectedSymbol, tradingMode);
 
   const { panelWidth, onResizeMouseDown } = useResizablePanel();
@@ -83,6 +84,7 @@ function App() {
           trades={trades}
           rlCostSummary={rlCostSummary}
           rlWeights={rlWeights}
+          rlTuning={rlTuning}
           tradingMode={tradingMode}
         />
 

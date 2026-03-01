@@ -42,6 +42,7 @@ from engine_rl_helpers import (
     rl_reward_skip_opportunity,
     rl_loss_penalty_cap,
 )
+from rl_tuning import get_value as rl_cfg
 
 # ─────────────────────────────────────────
 #  Self-Improving Engine v5 — Advanced Agent Suite
@@ -96,6 +97,10 @@ class TradingEngine:
         self.trades_closed = 0
         self.total_session_pnl = 0.0
         self.skipped_cycles_by_mode: dict[str, int] = {}
+        self.trades_executed_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
+        self.trades_closed_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
+        self.rl_updates_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
+        self.rl_trade_rewards_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
         self.last_llm_call = None
         self.missed_opportunities_count = 0
         self.last_entry_prices: dict = {}      # key(symbol:mode) -> (price, side, timestamp)
@@ -157,6 +162,30 @@ class TradingEngine:
         if str(decision_source).upper().startswith(prefix):
             return decision_source
         return f"{active_mode}_{decision_source}"
+
+    def _exploration_state(self, mode: str) -> dict:
+        active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        executed = int(self.trades_executed_by_mode.get(active_mode, 0) or 0)
+        closed = int(self.trades_closed_by_mode.get(active_mode, 0) or 0)
+        skip_streak = int(self.skipped_cycles_by_mode.get(active_mode, 0) or 0)
+        under_sampled = (
+            executed < int(rl_cfg("RL_MIN_TRADES_BEFORE_STRICT_GATES"))
+            or closed < int(rl_cfg("RL_MIN_CLOSED_TRADES_BEFORE_STRICT_GATES"))
+        )
+        force_entry = (
+            bool(rl_cfg("RL_FORCE_ENTRY_ON_SKIP_STREAK"))
+            and under_sampled
+            and skip_streak >= int(rl_cfg("RL_FORCE_ENTRY_SKIP_STREAK"))
+            and executed < int(rl_cfg("RL_FORCE_ENTRY_MAX_TRADES"))
+        )
+        return {
+            "mode": active_mode,
+            "executed": executed,
+            "closed": closed,
+            "skip_streak": skip_streak,
+            "under_sampled": under_sampled,
+            "force_entry": force_entry,
+        }
         logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
         logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
         logger.info(
@@ -675,7 +704,7 @@ class TradingEngine:
             + weights["session"] * session_score
         ) / w_sum
 
-        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.5, 0.25))
+        edge_score = self._clamp(expected_edge_pct / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")) * 2.5, 0.25))
         confidence_score = self._clamp(confidence + float(rl_inf.get("confidence_bias", 0.0)))
         composite_score = self._clamp((weighted_core * 0.82) + (edge_score * 0.10) + (confidence_score * 0.08))
 
@@ -946,7 +975,7 @@ class TradingEngine:
             volatility_score = 0.45
         session_map = {"PREMIUM": 1.0, "HIGH": 0.90, "MODERATE": 0.74, "LOW": 0.56}
         session_score = session_map.get(session_quality, 0.60)
-        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.8, 0.25))
+        edge_score = self._clamp(expected_edge_pct / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")) * 2.8, 0.25))
         rl_inf = self._rl_infer(
             mode="OPTIONS",
             regime=regime,
@@ -1289,7 +1318,7 @@ class TradingEngine:
             + weights["performance"] * performance_score
         ) / w_sum
 
-        edge_score = self._clamp(expected_edge_pct / max(config.MIN_EXPECTED_EDGE_PCT * 2.5, 0.25))
+        edge_score = self._clamp(expected_edge_pct / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")) * 2.5, 0.25))
         confidence_score = self._clamp(confidence + float(rl_inf.get("confidence_bias", 0.0)))
         composite_score = self._clamp((weighted_core * 0.80) + (strategy_fit * 0.10) + (edge_score * 0.05) + (confidence_score * 0.05))
 
@@ -1496,6 +1525,7 @@ class TradingEngine:
         if trade_result:
             self.total_session_pnl += trade_result["pnl"]
             self.trades_closed += 1
+            self.trades_closed_by_mode[active_mode] = int(self.trades_closed_by_mode.get(active_mode, 0) or 0) + 1
             self.session_tracker.record_trade(trade_result["pnl"])
             self.last_close_time_by_mode[active_mode] = datetime.now()  # Fix 5: record close time for cooldown
 
@@ -1543,11 +1573,13 @@ class TradingEngine:
                 pnl_usd = float(trade_result.get("pnl", 0.0) or 0.0)
                 pnl_reward = pnl_usd / notional
                 hold_secs = float(trade_result.get("hold_secs", 0) or 0)
-                raw_opp_cost_penalty = float(config.RL_OPEN_TRADE_COST_PENALTY) * max(1.5, hold_secs / 180.0)
+                raw_opp_cost_penalty = float(rl_cfg("RL_OPEN_TRADE_COST_PENALTY")) * max(1.5, hold_secs / 180.0)
                 opp_cap = self._rl_loss_penalty_cap(pnl_reward)
                 opp_cost_penalty = min(raw_opp_cost_penalty, opp_cap)
                 reward = pnl_reward - opp_cost_penalty
                 self.rl_agent.update(rl_mode, rl_state_key, rl_profile_id, reward)
+                self.rl_updates_by_mode[rl_mode] = int(self.rl_updates_by_mode.get(rl_mode, 0) or 0) + 1
+                self.rl_trade_rewards_by_mode[rl_mode] = int(self.rl_trade_rewards_by_mode.get(rl_mode, 0) or 0) + 1
                 save_rl_event(
                     mode=rl_mode,
                     profile_id=rl_profile_id,
@@ -1969,28 +2001,83 @@ class TradingEngine:
                             stochrsi_result, ema_result, volmom_result,
                             vote_weights=rl_vote_inf.get("voter_weight_mult", {}),
                         )
+                        explore = self._exploration_state(active_mode)
+                        under_sampled = bool(explore["under_sampled"])
+                        force_entry = bool(explore["force_entry"])
                         min_pro_needed_weighted = min_pro_needed * (total_vote_weight / 8.0)
-                        skip_streak = int(self.skipped_cycles_by_mode.get(active_mode, 0))
+                        skip_streak = int(explore["skip_streak"])
                         skip_pressure = max(
                             0.0,
                             min(
-                                float(config.RL_SKIP_PRESSURE_MAX),
-                                float(skip_streak - int(config.RL_SKIP_PRESSURE_START)) * float(config.RL_SKIP_PRESSURE_STEP),
+                                float(rl_cfg("RL_SKIP_PRESSURE_MAX")),
+                                float(skip_streak - int(rl_cfg("RL_SKIP_PRESSURE_START"))) * float(rl_cfg("RL_SKIP_PRESSURE_STEP")),
                             ),
                         )
+                        if under_sampled:
+                            min_pro_needed_weighted = max(
+                                0.8,
+                                min_pro_needed_weighted * float(rl_cfg("RL_UNDERSAMPLED_MIN_PRO_MULT")),
+                            )
                         if skip_pressure > 0:
                             min_pro_needed_weighted = max(1.0, min_pro_needed_weighted * (1.0 - skip_pressure))
 
                         # ── OPPORTUNITY PRE-FILTER (session-adjusted signal bar) ─
                         if buy_count < min_pro_needed_weighted and sell_count < min_pro_needed_weighted:
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            best = max(buy_count, sell_count)
-                            if self.skipped_cycles_by_mode[active_mode] % 6 == 1:
+                            if force_entry:
                                 intent(
-                                    f"⏳ Waiting for setup ({best:.1f}/{min_pro_needed_weighted:.1f} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
-                                    [symbol]
+                                    f"⚡ Exploration override [{active_mode}]: forcing setup evaluation after {skip_streak} skips.",
+                                    [symbol],
                                 )
-                            if self.skipped_cycles_by_mode[active_mode] % 3 == 0:
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                best = max(buy_count, sell_count)
+                                if self.skipped_cycles_by_mode[active_mode] % 6 == 1:
+                                    intent(
+                                        f"⏳ Waiting for setup ({best:.1f}/{min_pro_needed_weighted:.1f} pro signals) [{session_filt['session']}]. RSI:{rsi_result['rsi']:.1f} | {macd_result['crossover']} | BB:{bb_result['position_pct']:.0f}%",
+                                        [symbol]
+                                    )
+                                if self.skipped_cycles_by_mode[active_mode] % 3 == 0:
+                                    save_signal_event(
+                                        symbol,
+                                        current_price,
+                                        raw_buy_count,
+                                        raw_sell_count,
+                                        buy_count,
+                                        sell_count,
+                                        total_vote_weight,
+                                        rsi_result["rsi"],
+                                        macd_result["crossover"],
+                                        bb_result["position_pct"],
+                                        "SKIPPED",
+                                        decision_source=self._mode_decision_source(active_mode, "SETUP_WAIT"),
+                                    )
+                                continue
+
+                        # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
+                        # Quality enforced by confidence floor (0.70) + duplicate blocker (120s)
+                        dir_threshold = 2.0 * (total_vote_weight / 8.0)
+                        if under_sampled:
+                            dir_threshold = max(
+                                0.8,
+                                dir_threshold * float(rl_cfg("RL_UNDERSAMPLED_DIR_THRESHOLD_MULT")),
+                            )
+                        if skip_pressure > 0:
+                            dir_threshold = max(1.0, dir_threshold * (1.0 - (skip_pressure * 0.85)))
+                        if sell_count >= dir_threshold and sell_count > buy_count:
+                            proposed_dir = "SHORT"
+                        elif buy_count >= dir_threshold and buy_count >= sell_count:
+                            proposed_dir = "LONG"
+                        else:
+                            if force_entry:
+                                proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: forcing {proposed_dir} despite low directional edge.",
+                                    [symbol],
+                                )
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                directional_action = "LONG" if buy_count > sell_count else ("SHORT" if sell_count > buy_count else "NEUTRAL")
+                                directional_conf = max(buy_count, sell_count) / max(total_vote_weight, 1.0)
                                 save_signal_event(
                                     symbol,
                                     current_price,
@@ -2003,62 +2090,39 @@ class TradingEngine:
                                     macd_result["crossover"],
                                     bb_result["position_pct"],
                                     "SKIPPED",
-                                    decision_source=self._mode_decision_source(active_mode, "SETUP_WAIT"),
+                                    decision_source=self._mode_decision_source(active_mode, "DIRECTIONAL_EDGE_REJECT"),
+                                    deterministic_action=directional_action if directional_action != "NEUTRAL" else None,
+                                    deterministic_conf=directional_conf,
                                 )
-                            continue
-
-                        # ── Direction: 2+ signals for LONG, 2+ for SHORT ───
-                        # Quality enforced by confidence floor (0.70) + duplicate blocker (120s)
-                        dir_threshold = 2.0 * (total_vote_weight / 8.0)
-                        if skip_pressure > 0:
-                            dir_threshold = max(1.0, dir_threshold * (1.0 - (skip_pressure * 0.85)))
-                        if sell_count >= dir_threshold and sell_count > buy_count:
-                            proposed_dir = "SHORT"
-                        elif buy_count >= dir_threshold and buy_count >= sell_count:
-                            proposed_dir = "LONG"
-                        else:
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            directional_action = "LONG" if buy_count > sell_count else ("SHORT" if sell_count > buy_count else "NEUTRAL")
-                            directional_conf = max(buy_count, sell_count) / max(total_vote_weight, 1.0)
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "DIRECTIONAL_EDGE_REJECT"),
-                                deterministic_action=directional_action if directional_action != "NEUTRAL" else None,
-                                deterministic_conf=directional_conf,
-                            )
-                            continue  # Not enough signals for either direction
+                                continue  # Not enough signals for either direction
 
                         det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count, total_vote_weight)
                         deterministic_dir = "LONG" if det_action == "BUY" else ("SHORT" if det_action == "SELL" else "NEUTRAL")
                         if det_action == "NEUTRAL":
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "DETERMINISTIC_NEUTRAL"),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            continue
+                            if force_entry:
+                                det_action = "BUY" if proposed_dir == "LONG" else "SELL"
+                                det_conf = max(float(det_conf or 0.0), 0.51)
+                                det_reason = f"{det_reason} | exploration_override"
+                                deterministic_dir = proposed_dir
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "DETERMINISTIC_NEUTRAL"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                continue
 
                         # ── v6: MARKET REGIME FILTER ───────────────────────
                         baseline_edge_pct = self._estimate_expected_edge_pct(
@@ -2120,41 +2184,47 @@ class TradingEngine:
                             )
 
                         if allowed_dir not in ("ANY", proposed_dir):
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            intent(
-                                f"🚫 Regime MISMATCH: {proposed_dir} rejected in {regime} market. {regime_result['verdict']}",
-                                [symbol]
-                            )
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "REGIME_MISMATCH"),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            self._rl_penalize_skip(
-                                mode=active_mode,
-                                reason="regime_mismatch",
-                                expected_edge_pct=baseline_edge_pct,
-                                symbol=symbol,
-                                regime_result=regime_result,
-                                session_filt=session_filt,
-                                vol_result=vol_result,
-                                sentiment_snapshot=None,
-                                buy_count=buy_count,
-                                sell_count=sell_count,
-                                total_vote_weight=total_vote_weight,
-                            )
-                            continue
+                            if force_entry and baseline_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: bypassing regime mismatch ({regime}).",
+                                    [symbol],
+                                )
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                intent(
+                                    f"🚫 Regime MISMATCH: {proposed_dir} rejected in {regime} market. {regime_result['verdict']}",
+                                    [symbol]
+                                )
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "REGIME_MISMATCH"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="regime_mismatch",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=None,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
+                                )
+                                continue
 
                         # ── Sentiment Gate ─────────────────────────────────
                         sentiment_snapshot = None
@@ -2178,7 +2248,7 @@ class TradingEngine:
                         if not sentiment_ok:
                             if (
                                 skip_pressure > 0
-                                and baseline_edge_pct >= float(config.RL_SKIP_PRESSURE_EDGE_MIN)
+                                and baseline_edge_pct >= float(rl_cfg("RL_SKIP_PRESSURE_EDGE_MIN"))
                                 and max(buy_count, sell_count) >= dir_threshold
                             ):
                                 intent(
@@ -2187,6 +2257,13 @@ class TradingEngine:
                                 )
                                 sentiment_ok = True
                                 sentiment_verdict = f"{sentiment_verdict} | override:{skip_pressure:.2f}"
+                            elif force_entry and baseline_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: bypassing sentiment gate for early learning.",
+                                    [symbol],
+                                )
+                                sentiment_ok = True
+                                sentiment_verdict = f"{sentiment_verdict} | override:exploration"
                             else:
                                 self.skipped_cycles_by_mode[active_mode] += 1
                                 intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
@@ -2237,39 +2314,45 @@ class TradingEngine:
                             {"confirms": True, "htf_trend": "UNKNOWN", "verdict": "Tool error"},
                         )
                         if not mtf_result["confirms"] and mtf_result["htf_trend"] != "UNKNOWN":
-                            intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
-                            # Soft reject: add to miss count but don't hard-block
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "HTF_REJECT"),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            self._rl_penalize_skip(
-                                mode=active_mode,
-                                reason="htf_reject",
-                                expected_edge_pct=baseline_edge_pct,
-                                symbol=symbol,
-                                regime_result=regime_result,
-                                session_filt=session_filt,
-                                vol_result=vol_result,
-                                sentiment_snapshot=sentiment_snapshot,
-                                buy_count=buy_count,
-                                sell_count=sell_count,
-                                total_vote_weight=total_vote_weight,
-                            )
-                            continue
+                            if force_entry and baseline_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: bypassing HTF reject for sample collection.",
+                                    [symbol],
+                                )
+                            else:
+                                intent(f"📊 HTF REJECT: {mtf_result['verdict']}", [symbol])
+                                # Soft reject: add to miss count but don't hard-block
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "HTF_REJECT"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="htf_reject",
+                                    expected_edge_pct=baseline_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=sentiment_snapshot,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
+                                )
+                                continue
 
                         now = datetime.now()
 
@@ -2493,38 +2576,47 @@ class TradingEngine:
                             dynamic_sl,
                             total_vote_weight,
                         )
-                        if expected_edge_pct < config.MIN_EXPECTED_EDGE_PCT:
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, "EDGE_REJECT"),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            self._rl_penalize_skip(
-                                mode=active_mode,
-                                reason="edge_reject",
-                                expected_edge_pct=expected_edge_pct,
-                                symbol=symbol,
-                                regime_result=regime_result,
-                                session_filt=session_filt,
-                                vol_result=vol_result,
-                                sentiment_snapshot=sentiment_snapshot,
-                                buy_count=buy_count,
-                                sell_count=sell_count,
-                                total_vote_weight=total_vote_weight,
-                            )
-                            continue
+                        min_edge_required = float(rl_cfg("MIN_EXPECTED_EDGE_PCT"))
+                        if under_sampled:
+                            min_edge_required *= float(rl_cfg("RL_UNDERSAMPLED_EDGE_THRESHOLD_MULT"))
+                        if expected_edge_pct < min_edge_required:
+                            if force_entry and expected_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: low edge {expected_edge_pct:.4f}% accepted for learning.",
+                                    [symbol],
+                                )
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, "EDGE_REJECT"),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                self._rl_penalize_skip(
+                                    mode=active_mode,
+                                    reason="edge_reject",
+                                    expected_edge_pct=expected_edge_pct,
+                                    symbol=symbol,
+                                    regime_result=regime_result,
+                                    session_filt=session_filt,
+                                    vol_result=vol_result,
+                                    sentiment_snapshot=sentiment_snapshot,
+                                    buy_count=buy_count,
+                                    sell_count=sell_count,
+                                    total_vote_weight=total_vote_weight,
+                                )
+                                continue
 
                         pre_policy = self._product_policy_decision(
                             mode=active_mode,
@@ -2938,6 +3030,7 @@ class TradingEngine:
                         self._pending_rl_by_symbol[pos_key] = rl_context
 
                         self.trades_executed += 1
+                        self.trades_executed_by_mode[selected_mode] = int(self.trades_executed_by_mode.get(selected_mode, 0) or 0) + 1
                         self.skipped_cycles_by_mode[active_mode] = 0
                         lev_label = ""
                         if selected_mode == "FUTURES":

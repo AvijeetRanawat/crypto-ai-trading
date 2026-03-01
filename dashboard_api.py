@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +12,7 @@ from news_sentiment import build_sentiment_snapshot, summarize_sentiment_with_ll
 from database import save_llm_usage
 from logger import logger
 from rl_agent import PROFILES
+from rl_tuning import get_all_settings as get_rl_tuning_settings, update_settings as update_rl_tuning_settings
 
 app = FastAPI(title="Crypto AI Trading Dashboard")
 
@@ -817,6 +818,21 @@ async def get_rl_weights():
         "profiles": PROFILES,
         "learned": learned,
     }
+
+
+@app.get("/api/config/rl-tuning")
+async def get_rl_tuning():
+    return get_rl_tuning_settings()
+
+
+@app.put("/api/config/rl-tuning")
+async def put_rl_tuning(payload: dict = Body(default=None)):
+    payload = payload or {}
+    values = payload.get("values", payload)
+    try:
+        return update_rl_tuning_settings(values if isinstance(values, dict) else {})
+    except ValueError as exc:
+        return {"error": str(exc), **get_rl_tuning_settings()}
 
 
 @app.get("/api/regime")

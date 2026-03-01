@@ -3,6 +3,7 @@ from datetime import datetime
 from logger import logger
 from config import config
 from database import save_rl_event
+from rl_tuning import get_value as rl_cfg
 
 
 def rl_infer(engine, mode: str, regime: str, session_quality: str, volatility_pct: float, sentiment_score: float, vote_imbalance: float, expected_edge_pct: float) -> dict:
@@ -73,15 +74,25 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
     profile_id = str((policy_eval or {}).get("rl_profile_id", "") or "")
     if not state_key or not profile_id:
         return
-    edge_norm = max(0.0, float(expected_edge_pct or 0.0)) / max(float(config.MIN_EXPECTED_EDGE_PCT), 0.001)
-    raw_penalty = float(config.RL_OPPORTUNITY_COST_PENALTY) * min(2.5, 0.5 + edge_norm)
+    edge_norm = max(0.0, float(expected_edge_pct or 0.0)) / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")), 0.001)
+    mode_key = str(mode or "SPOT").upper()
+    mode_updates = int(getattr(engine, "rl_updates_by_mode", {}).get(mode_key, 0) or 0)
+    mode_trade_rewards = int(getattr(engine, "rl_trade_rewards_by_mode", {}).get(mode_key, 0) or 0)
+    penalty_scale = 1.0
+    if mode_updates < int(rl_cfg("RL_SKIP_PENALTY_WARMUP_UPDATES")):
+        penalty_scale *= float(rl_cfg("RL_SKIP_PENALTY_WARMUP_SCALE"))
+    if mode_trade_rewards < int(rl_cfg("RL_MIN_CLOSED_TRADES_BEFORE_STRICT_GATES")):
+        penalty_scale *= float(rl_cfg("RL_SKIP_PENALTY_LOW_TRADE_SCALE"))
+    raw_penalty = float(rl_cfg("RL_OPPORTUNITY_COST_PENALTY")) * min(2.5, 0.5 + edge_norm) * max(0.1, penalty_scale)
     penalty_cap = max(
-        float(config.RL_SKIP_PENALTY_FLOOR),
-        min(float(config.RL_SKIP_PENALTY_CAP), max(float(config.EARLY_STOP_LOSS_PCT), 0.05)),
+        float(rl_cfg("RL_SKIP_PENALTY_FLOOR")),
+        min(float(rl_cfg("RL_SKIP_PENALTY_CAP")), max(float(config.EARLY_STOP_LOSS_PCT), 0.05)),
     )
-    penalty = max(float(config.RL_SKIP_PENALTY_FLOOR), min(abs(raw_penalty), penalty_cap))
+    penalty = max(float(rl_cfg("RL_SKIP_PENALTY_FLOOR")), min(abs(raw_penalty), penalty_cap))
     reward = -abs(penalty)
     engine.rl_agent.update(mode, state_key, profile_id, reward)
+    if hasattr(engine, "rl_updates_by_mode"):
+        engine.rl_updates_by_mode[mode_key] = int(engine.rl_updates_by_mode.get(mode_key, 0) or 0) + 1
     save_rl_event(
         mode=mode,
         profile_id=profile_id,
@@ -96,12 +107,15 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
         hold_secs=0.0,
     )
     logger.info(
-        "RL_SKIP_PENALTY mode=%s profile=%s reason=%s edge=%.4f raw_pen=%.5f cap=%.5f reward=%.5f",
+        "RL_SKIP_PENALTY mode=%s profile=%s reason=%s edge=%.4f raw_pen=%.5f cap=%.5f scale=%.3f updates=%s closes=%s reward=%.5f",
         mode,
         profile_id,
         reason,
         float(expected_edge_pct or 0.0),
         float(raw_penalty),
         float(penalty_cap),
+        float(max(0.1, penalty_scale)),
+        mode_updates,
+        mode_trade_rewards,
         reward,
     )

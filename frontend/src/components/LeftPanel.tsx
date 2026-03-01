@@ -5,6 +5,7 @@ import type {
   MarketPoint,
   PortfolioSummary,
   RlCostSummary,
+  RlTuningSnapshot,
   RlWeightsSnapshot,
   SignalEvent,
   Trade,
@@ -28,6 +29,7 @@ interface LeftPanelProps {
   trades: Trade[];
   rlCostSummary: RlCostSummary;
   rlWeights: RlWeightsSnapshot;
+  rlTuning: RlTuningSnapshot;
   tradingMode: string;
 }
 
@@ -73,6 +75,7 @@ export function LeftPanel({
   trades,
   rlCostSummary,
   rlWeights,
+  rlTuning,
   tradingMode,
 }: LeftPanelProps) {
   type ChartApi = ReturnType<typeof createChart>;
@@ -576,7 +579,13 @@ export function LeftPanel({
           </div>
         </div>
       </div>
-      <RlAgentModal open={rlExpanded} mode={tradingMode} weights={rlWeights} onClose={() => setRlExpanded(false)} />
+      <RlAgentModal
+        open={rlExpanded}
+        mode={tradingMode}
+        weights={rlWeights}
+        tuning={rlTuning}
+        onClose={() => setRlExpanded(false)}
+      />
     </div>
   );
 }

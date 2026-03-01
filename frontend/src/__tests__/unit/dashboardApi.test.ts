@@ -83,15 +83,47 @@ describe("dashboardApi", () => {
     await dashboardApi.llmBreakdown();
     await dashboardApi.rlCost();
     await dashboardApi.rlWeights();
+    await dashboardApi.rlTuning();
+    await dashboardApi.updateRlTuning({ RL_FORCE_ENTRY_SKIP_STREAK: 5 });
     await dashboardApi.strategyDiagnostics("BTCUSDT", "SPOT");
     await dashboardApi.newsSentiment("BTCUSDT");
 
-    expect(fetchMock).toHaveBeenCalledTimes(16);
+    expect(fetchMock).toHaveBeenCalledTimes(18);
   });
 
   it("returns null when fetch throws", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
     const data = await dashboardApi.newsSentiment("BTCUSDT");
     expect(data).toBeNull();
+  });
+
+  it("returns null for failed RL tuning update response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+      }),
+    );
+    const data = await dashboardApi.updateRlTuning({ RL_FORCE_ENTRY_SKIP_STREAK: 9 });
+    expect(data).toBeNull();
+  });
+
+  it("returns null when RL tuning update throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("write failed")));
+    const data = await dashboardApi.updateRlTuning({ RL_FORCE_ENTRY_SKIP_STREAK: 9 });
+    expect(data).toBeNull();
+  });
+
+  it("uses empty object body when RL tuning payload is undefined", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await (dashboardApi.updateRlTuning as unknown as (v?: unknown) => Promise<unknown>)(undefined);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.body).toBe(JSON.stringify({ values: undefined }));
   });
 });

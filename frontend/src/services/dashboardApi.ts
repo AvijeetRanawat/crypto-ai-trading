@@ -8,6 +8,7 @@ import type {
   NewsSentiment,
   PortfolioSummary,
   RlCostSummary,
+  RlTuningSnapshot,
   RlWeightsSnapshot,
   RegimeData,
   SessionStartResponse,
@@ -25,6 +26,25 @@ async function fetchJson<T>(path: string): Promise<T | null> {
         "Cache-Control": "no-cache",
         Pragma: "no-cache",
       },
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function putJson<T>(path: string, body: unknown): Promise<T | null> {
+  try {
+    const response = await fetch(path, {
+      method: "PUT",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     });
     if (!response.ok) return null;
     return (await response.json()) as T;
@@ -57,6 +77,9 @@ export const dashboardApi = {
   llmBreakdown: () => fetchJson<LlmBreakdown>(`${API_BASE}/llm/breakdown`),
   rlCost: () => fetchJson<RlCostSummary>(`${API_BASE}/rl/cost`),
   rlWeights: () => fetchJson<RlWeightsSnapshot>(`${API_BASE}/rl/weights`),
+  rlTuning: () => fetchJson<RlTuningSnapshot>(`${API_BASE}/config/rl-tuning`),
+  updateRlTuning: (values: Record<string, number | boolean | null>) =>
+    putJson<RlTuningSnapshot>(`${API_BASE}/config/rl-tuning`, { values }),
   strategyDiagnostics: (symbol: string, mode: string) =>
     fetchJson<StrategyDiagnostics>(
       `${API_BASE}/strategy/diagnostics?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`,

@@ -273,6 +273,51 @@ as other RL profile parameters.
 - RL state is persisted at:
   - `data/rl_weights.json`
 - Survives restart and keeps learning continuity.
+- Runtime RL tuning overrides are persisted at:
+  - `data/rl_tuning_overrides.json`
+- Overrides are shared across processes (dashboard API + engine), so live tuning
+  from UI does not require restart.
+
+## Runtime RL Tuning (Live From Frontend)
+
+The RL system now supports live parameter tuning from the dashboard modal.
+
+- API:
+  - `GET /api/config/rl-tuning` returns tunable keys, current values, defaults, types, min/max bounds.
+  - `PUT /api/config/rl-tuning` updates override values (or clears to default with `null`).
+- Frontend:
+  - RL Agent modal includes a `Runtime RL Tuning` section.
+  - Users can edit numeric/boolean settings and save/reset defaults live.
+
+Tunable categories include:
+
+- exploration gating:
+  - `RL_MIN_TRADES_BEFORE_STRICT_GATES`
+  - `RL_MIN_CLOSED_TRADES_BEFORE_STRICT_GATES`
+- forced exploration:
+  - `RL_FORCE_ENTRY_ON_SKIP_STREAK`
+  - `RL_FORCE_ENTRY_SKIP_STREAK`
+  - `RL_FORCE_ENTRY_MAX_TRADES`
+  - `RL_FORCE_ENTRY_MIN_EDGE_PCT`
+- under-sampled gate softening:
+  - `RL_UNDERSAMPLED_MIN_PRO_MULT`
+  - `RL_UNDERSAMPLED_DIR_THRESHOLD_MULT`
+  - `RL_UNDERSAMPLED_EDGE_THRESHOLD_MULT`
+- skip-penalty scaling:
+  - `RL_OPPORTUNITY_COST_PENALTY`
+  - `RL_SKIP_PENALTY_CAP`
+  - `RL_SKIP_PENALTY_FLOOR`
+  - `RL_SKIP_PENALTY_WARMUP_UPDATES`
+  - `RL_SKIP_PENALTY_WARMUP_SCALE`
+  - `RL_SKIP_PENALTY_LOW_TRADE_SCALE`
+- skip-pressure dynamics:
+  - `RL_SKIP_PRESSURE_START`
+  - `RL_SKIP_PRESSURE_STEP`
+  - `RL_SKIP_PRESSURE_MAX`
+  - `RL_SKIP_PRESSURE_EDGE_MIN`
+- entry/trade reward context:
+  - `RL_OPEN_TRADE_COST_PENALTY`
+  - `MIN_EXPECTED_EDGE_PCT`
 
 ---
 
@@ -323,6 +368,7 @@ RL observability APIs:
 
 - `/api/rl/cost` for reward/penalty aggregates and recent RL events
 - `/api/rl/weights` for mode-specific profile multipliers and learned state tables
+- `/api/config/rl-tuning` for live runtime RL config inspection/update
 
 ---
 

@@ -1,10 +1,12 @@
-import { useMemo, useState } from "react";
-import type { RlLearnedState, RlWeightsSnapshot } from "../types/dashboard";
+import { useEffect, useMemo, useState } from "react";
+import { dashboardApi } from "../services/dashboardApi";
+import type { RlLearnedState, RlTuningSnapshot, RlWeightsSnapshot } from "../types/dashboard";
 
 interface RlAgentModalProps {
   open: boolean;
   mode: string;
   weights: RlWeightsSnapshot;
+  tuning: RlTuningSnapshot;
   onClose: () => void;
 }
 
@@ -34,16 +36,55 @@ function stateRowsForMode(weights: RlWeightsSnapshot, mode: string): RlLearnedSt
   return rows.slice(0, 16);
 }
 
-export function RlAgentModal({ open, mode, weights, onClose }: RlAgentModalProps) {
-  if (!open) return null;
-
+export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentModalProps) {
   const initialMode = useMemo(() => {
     const normalized = String(mode || "SPOT").toUpperCase();
     return normalized === "FUTURES" || normalized === "OPTIONS" ? normalized : "SPOT";
   }, [mode]);
   const [activeMode, setActiveMode] = useState<string>(initialMode);
+  const [draft, setDraft] = useState<Record<string, number | boolean | null>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("");
   const modeRows = stateRowsForMode(weights, activeMode);
   const modeProfiles = weights.profiles?.[activeMode] || {};
+  const tunableSettings = useMemo(() => (tuning.settings || []), [tuning.settings]);
+
+  useEffect(() => {
+    const next: Record<string, number | boolean | null> = {};
+    for (const item of tuning.settings || []) {
+      next[item.key] = item.value as number | boolean;
+    }
+    setDraft(next);
+  }, [tuning]);
+
+  if (!open) return null;
+
+  const onSave = async () => {
+    setSaving(true);
+    setSaveStatus("");
+    const updated = await dashboardApi.updateRlTuning(draft);
+    setSaving(false);
+    if (!updated || (updated as { error?: string }).error) {
+      setSaveStatus("Save failed");
+      return;
+    }
+    setSaveStatus("Saved");
+  };
+
+  const onReset = async () => {
+    if (!tunableSettings.length) return;
+    const resetValues: Record<string, null> = {};
+    for (const item of tunableSettings) resetValues[item.key] = null;
+    setSaving(true);
+    setSaveStatus("");
+    const updated = await dashboardApi.updateRlTuning(resetValues);
+    setSaving(false);
+    if (!updated || (updated as { error?: string }).error) {
+      setSaveStatus("Reset failed");
+      return;
+    }
+    setSaveStatus("Reset to defaults");
+  };
 
   return (
     <div className="modal-overlay" onClick={onClose} role="presentation">
@@ -136,6 +177,78 @@ export function RlAgentModal({ open, mode, weights, onClose }: RlAgentModalProps
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="sentiment-subsection-title">Runtime RL Tuning</div>
+          <div className="llm-breakdown-wrap llm-breakdown-modal-body rl-learned-list">
+            {!tunableSettings.length && <div className="empty-state">No tunable settings found</div>}
+            {!!tunableSettings.length &&
+              tunableSettings.map((setting) => {
+                const val = draft[setting.key];
+                return (
+                  <div className="rl-learned-item" key={setting.key}>
+                    <div className="rl-learned-head">
+                      <span className="mono rl-state-key">{setting.key}</span>
+                      <span className="mono">{setting.overridden ? "override" : "default"}</span>
+                    </div>
+                    <div className="rl-profile-row">
+                      <span>Current</span>
+                      <span className="mono">{String(setting.value)}</span>
+                    </div>
+                    <div className="rl-profile-row">
+                      <span>Default</span>
+                      <span className="mono">{String(setting.default)}</span>
+                    </div>
+                    {setting.type === "bool" ? (
+                      <label className="rl-profile-row" htmlFor={setting.key}>
+                        <span>Value</span>
+                        <input
+                          id={setting.key}
+                          type="checkbox"
+                          checked={Boolean(val)}
+                          onChange={(e) =>
+                            setDraft((prev) => ({
+                              ...prev,
+                              [setting.key]: e.target.checked,
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <label className="rl-profile-row" htmlFor={setting.key}>
+                        <span>Value</span>
+                        <input
+                          id={setting.key}
+                          className="rl-tune-input mono"
+                          type="number"
+                          step={setting.type === "int" ? 1 : 0.0001}
+                          min={setting.min}
+                          max={setting.max}
+                          value={typeof val === "number" ? val : Number(setting.value)}
+                          onChange={(e) =>
+                            setDraft((prev) => ({
+                              ...prev,
+                              [setting.key]:
+                                setting.type === "int"
+                                  ? Number.parseInt(e.target.value || "0", 10)
+                                  : Number.parseFloat(e.target.value || "0"),
+                            }))
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
+                );
+              })}
+            <div className="rl-modal-actions">
+              <button className="expand-btn" onClick={onSave} disabled={saving} type="button">
+                {saving ? "Saving..." : "Save Tuning"}
+              </button>
+              <button className="expand-btn" onClick={onReset} disabled={saving} type="button">
+                Reset Defaults
+              </button>
+              <span className="mono">{saveStatus}</span>
+            </div>
           </div>
         </div>
       </div>

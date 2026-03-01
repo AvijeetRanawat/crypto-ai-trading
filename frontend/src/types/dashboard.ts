@@ -256,6 +256,22 @@ export interface RlWeightsSnapshot {
   error?: string;
 }
 
+export interface RlTuningSetting {
+  key: string;
+  type: "float" | "int" | "bool";
+  default: number | boolean;
+  value: number | boolean;
+  overridden: boolean;
+  min?: number;
+  max?: number;
+}
+
+export interface RlTuningSnapshot {
+  settings: RlTuningSetting[];
+  updated_at: string;
+  error?: string;
+}
+
 export const DEFAULT_WARMUP: WarmupData = {
   symbol: "BTCUSDT",
   done: false,
@@ -388,6 +404,11 @@ export const DEFAULT_RL_COST_SUMMARY: RlCostSummary = {
     total_reward: 0,
   },
   recent: [],
+};
+
+export const DEFAULT_RL_TUNING: RlTuningSnapshot = {
+  settings: [],
+  updated_at: "",
 };
 
 export const DEFAULT_RL_WEIGHTS: RlWeightsSnapshot = {

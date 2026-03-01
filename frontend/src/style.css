@@ -1209,6 +1209,22 @@ body {
     background: rgba(255, 255, 255, 0.02);
 }
 
+.rl-tune-input {
+    width: 140px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 4px 8px;
+}
+
+.rl-modal-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+}
+
 /* ── LESSONS ── */
 .lessons-panel {
     flex: 0 0 auto;
