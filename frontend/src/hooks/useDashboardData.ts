@@ -63,6 +63,9 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
   const [newsSentiment, setNewsSentiment] = useState<NewsSentiment>(DEFAULT_NEWS_SENTIMENT);
 
   const sessionStartRef = useRef<string | null>(localStorage.getItem(STORAGE_KEYS.sessionStart));
+  const fastPollInFlightRef = useRef(false);
+  const slowPollInFlightRef = useRef(false);
+  const lastSlowPollAtRef = useRef(0);
 
   const resetSessionState = useCallback(() => {
     setWarmup({ ...DEFAULT_WARMUP });
@@ -103,44 +106,61 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     let active = true;
 
     const fastPoll = async () => {
-      await syncSessionStart();
-      if (!active) return;
+      if (fastPollInFlightRef.current) return;
+      fastPollInFlightRef.current = true;
+      try {
+        await syncSessionStart();
+        if (!active) {
+          return;
+        }
 
-      const [warm, market, portfolio, currentIntent, signalData, regimeData] = await Promise.all([
-        dashboardApi.warmup(),
-        dashboardApi.marketHistory(symbol),
-        dashboardApi.portfolioSummary(),
-        dashboardApi.intent(),
-        dashboardApi.signals(symbol, 60),
-        dashboardApi.regime(),
-      ]);
+        const [warm, market, portfolio, currentIntent, signalData, regimeData] = await Promise.all([
+          dashboardApi.warmup(symbol),
+          dashboardApi.marketHistory(symbol),
+          dashboardApi.portfolioSummary(),
+          dashboardApi.intent(),
+          dashboardApi.signals(symbol, 60),
+          dashboardApi.regime(symbol),
+        ]);
 
-      if (!active) return;
-      if (warm) setWarmup(warm);
-      if (market) setMarketHistory(market);
-      if (portfolio) setSummary(portfolio);
-      if (currentIntent) setIntent(currentIntent);
-      if (signalData) setSignals(signalData);
-      if (regimeData) setRegime(regimeData);
+        if (!active) return;
+        if (warm) setWarmup(warm);
+        if (market) setMarketHistory(market);
+        if (portfolio) setSummary(portfolio);
+        if (currentIntent) setIntent(currentIntent);
+        if (signalData) setSignals(signalData);
+        if (regimeData) setRegime(regimeData);
+      } finally {
+        fastPollInFlightRef.current = false;
+      }
     };
 
     const slowPoll = async () => {
-      const [tradeData, lessonData, logData, usage, breakdown, news] = await Promise.all([
+      const now = Date.now();
+      if (slowPollInFlightRef.current) return;
+      if (now - lastSlowPollAtRef.current < 2000) return;
+      slowPollInFlightRef.current = true;
+      lastSlowPollAtRef.current = now;
+      try {
+        const [tradeData, lessonData, logData, usage, breakdown, news] = await Promise.all([
         dashboardApi.tradesRecent(),
         dashboardApi.lessons(),
-        dashboardApi.logs(60),
+        dashboardApi.logs(120),
         dashboardApi.llmSummary(),
-        dashboardApi.llmBreakdown(),
-        dashboardApi.newsSentiment(),
-      ]);
+          dashboardApi.llmBreakdown(),
+          dashboardApi.newsSentiment(symbol),
+        ]);
 
-      if (!active) return;
-      if (tradeData) setTrades(tradeData);
-      if (lessonData) setLessons(lessonData);
-      if (logData?.logs) setLogs(logData.logs.join("").trim());
-      if (usage) setLlmSummary(usage);
-      if (breakdown) setLlmBreakdown(breakdown);
-      if (news) setNewsSentiment(news);
+        if (!active) return;
+        if (tradeData) setTrades(tradeData);
+        if (lessonData) setLessons(lessonData);
+        if (logData?.logs) setLogs(logData.logs.join("").trim());
+        if (usage) setLlmSummary(usage);
+        if (breakdown) setLlmBreakdown(breakdown);
+        if (news) setNewsSentiment(news);
+      } finally {
+        slowPollInFlightRef.current = false;
+      }
     };
 
     fastPoll();

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from xml.etree import ElementTree
 
 import requests
+from logger import logger
 
 
 REQUEST_TIMEOUT_SECONDS = 8
@@ -54,6 +55,49 @@ NEGATIVE_TERMS = {
 _CACHE: Dict[str, Any] = {"ts": 0.0, "payload": None}
 _SUMMARY_CACHE: Dict[str, Any] = {"ts": 0.0, "fingerprint": "", "summary": None, "usage_event": None}
 SUMMARY_CACHE_TTL_SECONDS = 300
+
+SYMBOL_TOPIC_MAP = {
+    "BTCUSDT": {
+        "name": "BTC",
+        "alphavantage_ticker": "CRYPTO:BTC",
+        "cryptocompare_categories": "BTC,Bitcoin",
+        "gdelt_query": "bitcoin OR btc OR cryptocurrency",
+    },
+    "ETHUSDT": {
+        "name": "ETH",
+        "alphavantage_ticker": "CRYPTO:ETH",
+        "cryptocompare_categories": "ETH,Ethereum",
+        "gdelt_query": "ethereum OR eth OR cryptocurrency",
+    },
+    "SOLUSDT": {
+        "name": "SOL",
+        "alphavantage_ticker": "CRYPTO:SOL",
+        "cryptocompare_categories": "SOL,Solana",
+        "gdelt_query": "solana OR sol OR cryptocurrency",
+    },
+    "ETHBTC": {
+        "name": "ETH",
+        "alphavantage_ticker": "CRYPTO:ETH",
+        "cryptocompare_categories": "ETH,Ethereum",
+        "gdelt_query": "ethereum OR eth OR cryptocurrency",
+    },
+    "SOLBTC": {
+        "name": "SOL",
+        "alphavantage_ticker": "CRYPTO:SOL",
+        "cryptocompare_categories": "SOL,Solana",
+        "gdelt_query": "solana OR sol OR cryptocurrency",
+    },
+    "SOLETH": {
+        "name": "SOL",
+        "alphavantage_ticker": "CRYPTO:SOL",
+        "cryptocompare_categories": "SOL,Solana",
+        "gdelt_query": "solana OR sol OR cryptocurrency",
+    },
+}
+
+
+def _topic_for_symbol(symbol: str) -> Dict[str, str]:
+    return SYMBOL_TOPIC_MAP.get(str(symbol).upper(), SYMBOL_TOPIC_MAP["BTCUSDT"])
 
 
 def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -120,7 +164,7 @@ def _safe_get_text(url: str, params: Optional[Dict[str, Any]] = None) -> Optiona
         return None
 
 
-def fetch_cryptocompare_news(api_key: str, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_cryptocompare_news(api_key: str, categories: str, limit: int = 10) -> List[Dict[str, Any]]:
     if not api_key:
         return []
 
@@ -128,7 +172,7 @@ def fetch_cryptocompare_news(api_key: str, limit: int = 10) -> List[Dict[str, An
         "https://min-api.cryptocompare.com/data/v2/news/",
         params={
             "lang": "EN",
-            "categories": "BTC,Bitcoin",
+            "categories": categories,
             "sortOrder": "latest",
             "limit": limit,
         },
@@ -157,7 +201,7 @@ def fetch_cryptocompare_news(api_key: str, limit: int = 10) -> List[Dict[str, An
     return out
 
 
-def fetch_alpha_vantage_news(api_key: str, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_alpha_vantage_news(api_key: str, ticker: str, limit: int = 10) -> List[Dict[str, Any]]:
     if not api_key:
         return []
 
@@ -165,7 +209,7 @@ def fetch_alpha_vantage_news(api_key: str, limit: int = 10) -> List[Dict[str, An
         "https://www.alphavantage.co/query",
         params={
             "function": "NEWS_SENTIMENT",
-            "tickers": "CRYPTO:BTC",
+            "tickers": ticker,
             "sort": "LATEST",
             "limit": limit,
             "apikey": api_key,
@@ -248,11 +292,11 @@ def fetch_cointelegraph_rss(limit: int = 12) -> List[Dict[str, Any]]:
     return out
 
 
-def fetch_gdelt_news(limit: int = 12) -> List[Dict[str, Any]]:
+def fetch_gdelt_news(query: str, limit: int = 12) -> List[Dict[str, Any]]:
     data = _safe_get_json(
         "https://api.gdeltproject.org/api/v2/doc/doc",
         params={
-            "query": "bitcoin OR btc OR cryptocurrency",
+            "query": query,
             "mode": "ArtList",
             "maxrecords": limit,
             "format": "json",
@@ -280,17 +324,19 @@ def fetch_gdelt_news(limit: int = 12) -> List[Dict[str, Any]]:
     return out
 
 
-def build_sentiment_snapshot(alpha_key: str, cryptocompare_key: str) -> Dict[str, Any]:
+def build_sentiment_snapshot(alpha_key: str, cryptocompare_key: str, symbol: str = "BTCUSDT") -> Dict[str, Any]:
     now = time.time()
     cached_payload = _CACHE.get("payload")
-    if cached_payload and now - float(_CACHE.get("ts", 0.0)) < CACHE_TTL_SECONDS:
+    cached_symbol = str((_CACHE.get("payload") or {}).get("symbol", "")).upper()
+    if cached_payload and cached_symbol == str(symbol).upper() and now - float(_CACHE.get("ts", 0.0)) < CACHE_TTL_SECONDS:
         return cached_payload
 
+    topic = _topic_for_symbol(symbol)
     provider_items: Dict[str, List[Dict[str, Any]]] = {
-        "alphavantage": fetch_alpha_vantage_news(alpha_key, limit=10),
-        "cryptocompare": fetch_cryptocompare_news(cryptocompare_key, limit=10),
+        "alphavantage": fetch_alpha_vantage_news(alpha_key, ticker=topic["alphavantage_ticker"], limit=10),
+        "cryptocompare": fetch_cryptocompare_news(cryptocompare_key, categories=topic["cryptocompare_categories"], limit=10),
         "cointelegraph": fetch_cointelegraph_rss(limit=10),
-        "gdelt": fetch_gdelt_news(limit=10),
+        "gdelt": fetch_gdelt_news(query=topic["gdelt_query"], limit=10),
     }
 
     fear_greed = fetch_fear_and_greed()
@@ -326,7 +372,7 @@ def build_sentiment_snapshot(alpha_key: str, cryptocompare_key: str) -> Dict[str
 
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
-        "symbol": "BTCUSDT",
+        "symbol": str(symbol).upper(),
         "sentiment_score": round(composite, 3),
         "sentiment_label": _label(composite),
         "components": {
@@ -348,7 +394,55 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text or "") / 4))
 
 
+def _coerce_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        v = value.get("value")
+        if isinstance(v, str):
+            return v.strip()
+        t = value.get("text")
+        if isinstance(t, str):
+            return t.strip()
+    return ""
+
+
+def _extract_responses_text(payload: Dict[str, Any]) -> str:
+    text = str(payload.get("output_text") or "").strip()
+    if text:
+        return text
+
+    out = payload.get("output") or []
+    parts: List[str] = []
+    for item in out:
+        item_type = (item or {}).get("type")
+        if item_type == "output_text":
+            t = _coerce_text((item or {}).get("text"))
+            if t:
+                parts.append(t)
+            continue
+        if item_type != "message":
+            continue
+        for c in (item.get("content") or []):
+            ctype = (c or {}).get("type")
+            if ctype not in {"output_text", "text"}:
+                continue
+            t = _coerce_text(c.get("text")) or _coerce_text(c.get("value"))
+            if t:
+                parts.append(t)
+
+    # Some responses may place text blocks at top-level content.
+    for c in (payload.get("content") or []):
+        t = _coerce_text(c.get("text")) or _coerce_text(c.get("value"))
+        if t:
+            parts.append(t)
+
+    return "\n".join([p for p in parts if p]).strip()
+
+
 def _build_summary_prompt(snapshot: Dict[str, Any]) -> str:
+    symbol = str(snapshot.get("symbol") or "BTCUSDT").upper()
+    coin_name = _topic_for_symbol(symbol)["name"]
     score = snapshot.get("sentiment_score", 0.0)
     label = snapshot.get("sentiment_label", "NEUTRAL")
     components = snapshot.get("components", {}) or {}
@@ -356,7 +450,7 @@ def _build_summary_prompt(snapshot: Dict[str, Any]) -> str:
     headlines = snapshot.get("articles", [])[:8]
 
     lines = [
-        "Summarize BTC market sentiment for a trader in <= 70 words.",
+        f"Summarize {coin_name} market sentiment for a trader in <= 70 words.",
         "Return plain text only.",
         "Include: direction (bullish/bearish/neutral), confidence (low/medium/high), and 1 risk to watch.",
         "",
@@ -418,8 +512,11 @@ def summarize_sentiment_with_openai(
     now = time.time()
     cached = _SUMMARY_CACHE.get("summary")
     cached_fp = _SUMMARY_CACHE.get("fingerprint", "")
+    cached_symbol = str((cached or {}).get("symbol", "")).upper()
+    current_symbol = str(snapshot.get("symbol", "")).upper()
     if (
         cached
+        and cached_symbol == current_symbol
         and cached_fp == fingerprint
         and now - float(_SUMMARY_CACHE.get("ts", 0.0)) < SUMMARY_CACHE_TTL_SECONDS
     ):
@@ -430,30 +527,248 @@ def summarize_sentiment_with_openai(
 
     prompt = _build_summary_prompt(snapshot)
     started = time.time()
-    resp = requests.post(
-        f"{openai_base_url.rstrip('/')}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {openai_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
+
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    safe_headers = {
+        "Authorization": "Bearer ***REDACTED***",
+        "Content-Type": "application/json",
+    }
+    base = openai_base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    if base.endswith("/v1"):
+        api_root = base
+    else:
+        api_root = f"{base}/v1"
+
+    # GPT-5 models are most reliable on Responses API.
+    payload = None
+    text = ""
+    usage = {}
+    error_text = ""
+    model_lower = str(model_id or "").lower()
+    supports_custom_temperature = not model_lower.startswith("gpt-5")
+    aggregate_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    try:
+        responses_payload = {
+            "model": model_id,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "max_output_tokens": 140,
+        }
+        if supports_custom_temperature:
+            responses_payload["temperature"] = 0.1
+
+        logger.info(f"OPENAI_REQ POST {api_root}/responses model={model_id} symbol={current_symbol}")
+        logger.info(
+            "OPENAI_REQ_VERBOSE endpoint=%s headers=%s payload=%s",
+            f"{api_root}/responses",
+            json.dumps(safe_headers, default=str),
+            json.dumps(responses_payload, default=str),
+        )
+        resp = requests.post(
+            f"{api_root}/responses",
+            headers=headers,
+            json=responses_payload,
+            timeout=20,
+        )
+        logger.info(
+            f"OPENAI_RES POST {api_root}/responses -> {resp.status_code} "
+            f"({int((time.time() - started) * 1000)}ms)"
+        )
+        logger.info("OPENAI_RES_VERBOSE endpoint=%s body=%s", f"{api_root}/responses", (resp.text or ""))
+        if not resp.ok:
+            error_text = (resp.text or "").strip()[:500]
+            logger.error(
+                f"OPENAI_ERR model={model_id} symbol={current_symbol} "
+                f"endpoint=/responses status={resp.status_code} body={error_text}"
+            )
+            resp.raise_for_status()
+        payload = resp.json()
+        text = _extract_responses_text(payload)
+        usage_responses = payload.get("usage", {}) or {}
+        aggregate_usage["input_tokens"] += int(usage_responses.get("input_tokens") or usage_responses.get("prompt_tokens") or 0)
+        aggregate_usage["output_tokens"] += int(usage_responses.get("output_tokens") or usage_responses.get("completion_tokens") or 0)
+        aggregate_usage["total_tokens"] += int(usage_responses.get("total_tokens") or 0)
+        usage = dict(usage_responses)
+
+        # If Responses produced only reasoning tokens and no text, run chat fallback for final text.
+        if not text:
+            logger.warning(
+                "OPENAI responses returned empty text for model=%s symbol=%s; "
+                "attempting /chat/completions fallback for final summary.",
+                model_id,
+                current_symbol,
+            )
+            fallback_started = time.time()
+            chat_payload = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_completion_tokens": 220,
+            }
+            if supports_custom_temperature:
+                chat_payload["temperature"] = 0.1
+
+            logger.info(f"OPENAI_REQ POST {api_root}/chat/completions model={model_id} symbol={current_symbol}")
+            logger.info(
+                "OPENAI_REQ_VERBOSE endpoint=%s headers=%s payload=%s",
+                f"{api_root}/chat/completions",
+                json.dumps(safe_headers, default=str),
+                json.dumps(chat_payload, default=str),
+            )
+            resp2 = requests.post(
+                f"{api_root}/chat/completions",
+                headers=headers,
+                json=chat_payload,
+                timeout=20,
+            )
+            logger.info(
+                f"OPENAI_RES POST {api_root}/chat/completions -> {resp2.status_code} "
+                f"({int((time.time() - fallback_started) * 1000)}ms)"
+            )
+            logger.info("OPENAI_RES_VERBOSE endpoint=%s body=%s", f"{api_root}/chat/completions", (resp2.text or ""))
+            if not resp2.ok:
+                error_text = (resp2.text or "").strip()[:500]
+                logger.error(
+                    f"OPENAI_ERR model={model_id} symbol={current_symbol} "
+                    f"status={resp2.status_code} body={error_text}"
+                )
+                resp2.raise_for_status()
+
+            payload2 = resp2.json()
+            choices2 = payload2.get("choices") or []
+            text = ((choices2[0] or {}).get("message") or {}).get("content", "") if choices2 else ""
+            usage_chat = payload2.get("usage", {}) or {}
+            aggregate_usage["input_tokens"] += int(usage_chat.get("input_tokens") or usage_chat.get("prompt_tokens") or 0)
+            aggregate_usage["output_tokens"] += int(usage_chat.get("output_tokens") or usage_chat.get("completion_tokens") or 0)
+            aggregate_usage["total_tokens"] += int(usage_chat.get("total_tokens") or 0)
+
+            in_res = int(usage_responses.get("prompt_tokens") or usage_responses.get("input_tokens") or 0)
+            out_res = int(usage_responses.get("completion_tokens") or usage_responses.get("output_tokens") or 0)
+            tot_res = int(usage_responses.get("total_tokens") or (in_res + out_res))
+            in_chat = int(usage_chat.get("prompt_tokens") or usage_chat.get("input_tokens") or 0)
+            out_chat = int(usage_chat.get("completion_tokens") or usage_chat.get("output_tokens") or 0)
+            tot_chat = int(usage_chat.get("total_tokens") or (in_chat + out_chat))
+            usage = {
+                "input_tokens": in_res + in_chat,
+                "output_tokens": out_res + out_chat,
+                "total_tokens": tot_res + tot_chat,
+            }
+    except Exception as e:
+        logger.warning(
+            f"OPENAI responses call failed for model={model_id} symbol={current_symbol}: {e}. "
+            "Falling back to /chat/completions."
+        )
+        # Fallback for older-compatible setups.
+        fallback_started = time.time()
+        chat_payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": 140,
-        },
-        timeout=20,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    latency_ms = int((time.time() - started) * 1000)
+            "max_completion_tokens": 140,
+        }
+        if supports_custom_temperature:
+            chat_payload["temperature"] = 0.1
 
-    choices = payload.get("choices") or []
-    text = ((choices[0] or {}).get("message") or {}).get("content", "") if choices else ""
-    usage = payload.get("usage", {}) or {}
-    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or _estimate_tokens(prompt))
-    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or _estimate_tokens(text))
-    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        logger.info(f"OPENAI_REQ POST {api_root}/chat/completions model={model_id} symbol={current_symbol}")
+        logger.info(
+            "OPENAI_REQ_VERBOSE endpoint=%s headers=%s payload=%s",
+            f"{api_root}/chat/completions",
+            json.dumps(safe_headers, default=str),
+            json.dumps(chat_payload, default=str),
+        )
+        resp = requests.post(
+            f"{api_root}/chat/completions",
+            headers=headers,
+            json=chat_payload,
+            timeout=20,
+        )
+        logger.info(
+            f"OPENAI_RES POST {api_root}/chat/completions -> {resp.status_code} "
+            f"({int((time.time() - fallback_started) * 1000)}ms)"
+        )
+        logger.info("OPENAI_RES_VERBOSE endpoint=%s body=%s", f"{api_root}/chat/completions", (resp.text or ""))
+        if not resp.ok:
+            error_text = (resp.text or "").strip()[:500]
+            logger.error(
+                f"OPENAI_ERR model={model_id} symbol={current_symbol} "
+                f"status={resp.status_code} body={error_text}"
+            )
+            resp.raise_for_status()
+        payload = resp.json()
+        choices = payload.get("choices") or []
+        text = ((choices[0] or {}).get("message") or {}).get("content", "") if choices else ""
+        usage = payload.get("usage", {}) or {}
+        aggregate_usage["input_tokens"] += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        aggregate_usage["output_tokens"] += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        aggregate_usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+
+    latency_ms = int((time.time() - started) * 1000)
+    if not text and error_text:
+        text = f"Summary unavailable: {error_text}"
+    if not text:
+        # Final rescue path: use a lightweight non-reasoning model for text output.
+        rescue_model = "gpt-4.1-mini"
+        logger.warning(
+            "OPENAI_EMPTY_OUTPUT model=%s symbol=%s. Attempting rescue model=%s",
+            model_id,
+            current_symbol,
+            rescue_model,
+        )
+        rescue_payload = {
+            "model": rescue_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 180,
+        }
+        logger.info("OPENAI_REQ POST %s/chat/completions model=%s symbol=%s", api_root, rescue_model, current_symbol)
+        logger.info(
+            "OPENAI_REQ_VERBOSE endpoint=%s headers=%s payload=%s",
+            f"{api_root}/chat/completions",
+            json.dumps(safe_headers, default=str),
+            json.dumps(rescue_payload, default=str),
+        )
+        rescue_resp = requests.post(
+            f"{api_root}/chat/completions",
+            headers=headers,
+            json=rescue_payload,
+            timeout=20,
+        )
+        logger.info("OPENAI_RES POST %s/chat/completions -> %s", api_root, rescue_resp.status_code)
+        logger.info("OPENAI_RES_VERBOSE endpoint=%s body=%s", f"{api_root}/chat/completions", (rescue_resp.text or ""))
+        if rescue_resp.ok:
+            rescue_json = rescue_resp.json()
+            rescue_choices = rescue_json.get("choices") or []
+            rescue_text = ((rescue_choices[0] or {}).get("message") or {}).get("content", "") if rescue_choices else ""
+            if rescue_text:
+                text = rescue_text.strip()
+            rescue_usage = rescue_json.get("usage", {}) or {}
+            aggregate_usage["input_tokens"] += int(rescue_usage.get("input_tokens") or rescue_usage.get("prompt_tokens") or 0)
+            aggregate_usage["output_tokens"] += int(rescue_usage.get("output_tokens") or rescue_usage.get("completion_tokens") or 0)
+            aggregate_usage["total_tokens"] += int(rescue_usage.get("total_tokens") or 0)
+        if not text:
+            text = "Summary unavailable: model returned empty output."
+        logger.warning(f"OPENAI_EMPTY_OUTPUT model={model_id} symbol={current_symbol}")
+        try:
+            logger.warning(
+                "OPENAI_EMPTY_OUTPUT_PAYLOAD model=%s symbol=%s payload=%s",
+                model_id,
+                current_symbol,
+                json.dumps(payload or {}, default=str)[:2000],
+            )
+        except Exception:
+            pass
+
+    input_tokens = int(aggregate_usage.get("input_tokens") or usage.get("prompt_tokens") or usage.get("input_tokens") or _estimate_tokens(prompt))
+    output_tokens = int(aggregate_usage.get("output_tokens") or usage.get("completion_tokens") or usage.get("output_tokens") or _estimate_tokens(text))
+    total_tokens = int(aggregate_usage.get("total_tokens") or usage.get("total_tokens") or (input_tokens + output_tokens))
     cost = round(
         ((input_tokens / 1_000_000) * input_price_per_1m)
         + ((output_tokens / 1_000_000) * output_price_per_1m),
@@ -463,6 +778,7 @@ def summarize_sentiment_with_openai(
     summary = {
         "text": (text or "").strip(),
         "model_id": model_id,
+        "symbol": current_symbol,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cached": False,
     }
@@ -483,4 +799,8 @@ def summarize_sentiment_with_openai(
 
     out = dict(snapshot)
     out["llm_summary"] = dict(summary)
+    logger.info(
+        f"OPENAI_SUMMARY_OK model={model_id} symbol={current_symbol} "
+        f"tokens={total_tokens} cost=${cost:.6f} latency_ms={latency_ms}"
+    )
     return out, usage_event

@@ -15,6 +15,7 @@ Default dashboard URL: `http://localhost:8000`
 ## What This Project Does
 
 - Pulls market data for allowlisted symbols (for example `BTCUSDT`)
+  - Default allowlist: `BTCUSDT,ETHUSDT,SOLUSDT,ETHBTC,SOLBTC,SOLETH`
 - Computes deterministic strategy votes (momentum/swing + technical tools)
 - Optionally calls an LLM on borderline setups
 - Simulates trades in paper mode (default)
@@ -65,6 +66,10 @@ Open:
 
 Important: each `python run.py` starts a fresh session and clears transient session data while preserving lessons/rules.
 
+`run.py` also supports automatic backend restarts on code changes:
+- `AUTO_RESTART_ON_BACKEND_CHANGES=true` (default)
+- Set `AUTO_RESTART_ON_BACKEND_CHANGES=false` to disable.
+
 ## Frontend Architecture
 
 The dashboard UI is React + TypeScript built with Vite:
@@ -112,14 +117,14 @@ Common keys:
 - Exchange:
   - `EXCHANGE=BINANCE` or `COINDCX`
   - `BINANCE_REST_BASE_URL=https://api.binance.us`
-  - `BLUE_CHIP_WHITELIST=BTCUSDT,ETHUSDT`
+  - `BLUE_CHIP_WHITELIST=BTCUSDT,ETHUSDT,SOLUSDT,ETHBTC,SOLBTC,SOLETH`
 - Trading mode:
   - `TRADING_MODE=SIMULATION` (recommended)
 - LLM:
   - `LLM_PROVIDER=OPENAI` or `BEDROCK`
   - `OPENAI_API_KEY=...`
   - `OPENAI_MODEL_ID=gpt-4o` (or another supported model)
-  - `OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-5-nano` (dashboard sentiment summarizer)
+  - `OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-4.1-mini` (dashboard sentiment summarizer)
 - News/Sentiment:
   - `ALPHAVANTAGE_API_KEY=...` (optional, used for `NEWS_SENTIMENT`)
   - `CRYPTOCOMPARE_API_KEY=...` (optional)

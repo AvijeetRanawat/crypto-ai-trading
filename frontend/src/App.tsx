@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { LeftPanel } from "./components/LeftPanel";
 import { LogsPanel } from "./components/LogsPanel";
 import { RightPanel } from "./components/RightPanel";
@@ -7,8 +7,10 @@ import { useDashboardData } from "./hooks/useDashboardData";
 import { useResizablePanel } from "./hooks/useResizablePanel";
 import { useTheme } from "./hooks/useTheme";
 import { formatUptime } from "./utils/format";
+import { SUPPORTED_SYMBOLS } from "./utils/constants";
 
 function App() {
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(SUPPORTED_SYMBOLS[0]);
   const [theme, setTheme] = useTheme();
   const {
     nowMs,
@@ -25,7 +27,7 @@ function App() {
     llmSummary,
     llmBreakdown,
     newsSentiment,
-  } = useDashboardData("BTCUSDT");
+  } = useDashboardData(selectedSymbol);
 
   const { panelWidth, onResizeMouseDown } = useResizablePanel();
 
@@ -46,6 +48,8 @@ function App() {
       <main className="dashboard">
         <LeftPanel
           theme={theme}
+          selectedSymbol={selectedSymbol}
+          onSelectSymbol={setSelectedSymbol}
           warmup={warmup}
           marketHistory={marketHistory}
           summary={summary}

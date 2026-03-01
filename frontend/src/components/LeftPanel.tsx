@@ -2,13 +2,16 @@ import { useEffect, useMemo, useRef } from "react";
 import { Chart, type ChartData, registerables } from "chart.js";
 import { ColorType, CrosshairMode, createChart, type UTCTimestamp } from "lightweight-charts";
 import type { MarketPoint, PortfolioSummary, SignalEvent, Trade, WarmupData } from "../types/dashboard";
-import { formatPct, formatUsd } from "../utils/format";
+import { formatPair, formatPct, formatUsd } from "../utils/format";
 import { getThemeTokens } from "../utils/theme";
+import { SUPPORTED_SYMBOLS } from "../utils/constants";
 
 Chart.register(...registerables);
 
 interface LeftPanelProps {
   theme: "light" | "dark";
+  selectedSymbol: string;
+  onSelectSymbol: (symbol: string) => void;
   warmup: WarmupData;
   marketHistory: MarketPoint[];
   summary: PortfolioSummary;
@@ -36,7 +39,26 @@ function buildPerfSummary(trades: Trade[]): PerfSummary {
   };
 }
 
-export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trades }: LeftPanelProps) {
+function getPriceDigits(price: number): number {
+  if (!Number.isFinite(price) || price <= 0) return 2;
+  if (price >= 1000) return 0;
+  if (price >= 100) return 2;
+  if (price >= 1) return 3;
+  if (price >= 0.1) return 5;
+  if (price >= 0.01) return 6;
+  return 8;
+}
+
+export function LeftPanel({
+  theme,
+  selectedSymbol,
+  onSelectSymbol,
+  warmup,
+  marketHistory,
+  summary,
+  signals,
+  trades,
+}: LeftPanelProps) {
   type ChartApi = ReturnType<typeof createChart>;
   type LineSeriesApi = ReturnType<ChartApi["addLineSeries"]>;
   type HistogramSeriesApi = ReturnType<ChartApi["addHistogramSeries"]>;
@@ -67,6 +89,8 @@ export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trad
     if (!base) return 0;
     return ((latest - base) / base) * 100;
   }, [marketHistory]);
+
+  const priceDigits = useMemo(() => getPriceDigits(currentPrice), [currentPrice]);
 
   const perfSummary = useMemo(() => buildPerfSummary(trades), [trades]);
 
@@ -176,6 +200,14 @@ export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trad
 
     if (unique.length) priceSeriesRef.current.setData(unique);
   }, [marketHistory]);
+
+  useEffect(() => {
+    if (!priceSeriesRef.current) return;
+    const minMove = Number((1 / 10 ** priceDigits).toFixed(priceDigits));
+    priceSeriesRef.current.applyOptions({
+      priceFormat: { type: "price", precision: priceDigits, minMove },
+    });
+  }, [priceDigits]);
 
   useEffect(() => {
     if (!buySeriesRef.current || !sellSeriesRef.current || !priceSeriesRef.current || !signals.length) return;
@@ -340,9 +372,23 @@ export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trad
   return (
     <div className="chart-area">
       <div className="price-ticker">
-        <span className="pair">BTC / USDT</span>
+        <span className="pair">{formatPair(selectedSymbol)}</span>
+        <select
+          className="symbol-select"
+          value={selectedSymbol}
+          onChange={(e) => onSelectSymbol(e.target.value)}
+        >
+          {SUPPORTED_SYMBOLS.map((symbol) => (
+            <option key={symbol} value={symbol}>
+              {formatPair(symbol)}
+            </option>
+          ))}
+        </select>
         <span className="live-price">
-          ${currentPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+          ${currentPrice.toLocaleString("en-US", {
+            minimumFractionDigits: priceDigits,
+            maximumFractionDigits: priceDigits,
+          })}
         </span>
         <span className={`live-change ${priceChange >= 0 ? "positive" : "negative"}`}>
           {formatPct(priceChange)}
@@ -359,7 +405,10 @@ export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trad
           {summary.open_position
             ? `${summary.open_position.side} ${summary.open_position.symbol} @ $${Number(
                 summary.open_position.entry_price || 0,
-              ).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+              ).toLocaleString("en-US", {
+                minimumFractionDigits: priceDigits,
+                maximumFractionDigits: priceDigits,
+              })}`
             : "No open position"}
         </span>
         <div className="legend">
@@ -432,7 +481,10 @@ export function LeftPanel({ theme, warmup, marketHistory, summary, signals, trad
                 <div className={`trade-row ${pnlClass}`} key={`${trade.id || idx}-${time}`}>
                   <span className={`trade-side ${side === "LONG" ? "buy" : "sell"}`}>{sideIcon} {side}</span>
                   <span className="trade-price">
-                    ${Number(trade.price || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                    ${Number(trade.price || 0).toLocaleString("en-US", {
+                      minimumFractionDigits: priceDigits,
+                      maximumFractionDigits: priceDigits,
+                    })}
                   </span>
                   <span className={`trade-pnl ${pnlClass}`}>
                     {pnl !== 0 ? formatUsd(pnl) : trade.status || "-"}

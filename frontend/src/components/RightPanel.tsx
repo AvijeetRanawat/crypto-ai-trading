@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { LlmBreakdownModal } from "./LlmBreakdownModal";
+import { MarketSentimentModal } from "./MarketSentimentModal";
 import type {
   IntentData,
   Lesson,
@@ -60,6 +61,7 @@ export function RightPanel({
   lessons,
 }: RightPanelProps) {
   const [llmExpanded, setLlmExpanded] = useState(false);
+  const [sentimentExpanded, setSentimentExpanded] = useState(false);
   const buyVotes = latestSignal?.buy_votes ?? 0;
   const sellVotes = latestSignal?.sell_votes ?? 0;
 
@@ -139,8 +141,11 @@ export function RightPanel({
       </div>
 
       <div className="panel-section glass sentiment-panel">
-        <div className="section-header">
+        <div className="section-header llm-header">
           <span>MARKET SENTIMENT & NEWS</span>
+          <button className="expand-btn" onClick={() => setSentimentExpanded(true)} type="button">
+            Expand
+          </button>
         </div>
         <div className="sentiment-summary-row">
           <span className={`sentiment-badge ${sentimentClassName(newsSentiment.sentiment_label)}`}>
@@ -165,6 +170,7 @@ export function RightPanel({
             {newsSentiment.llm_summary?.text || "Summary pending..."}
           </div>
         </div>
+        <div className="sentiment-subsection-title">Latest News + Sentiment</div>
         <div className="news-list">
           {!newsSentiment.articles.length && <div className="empty-state">No news data yet</div>}
           {newsSentiment.articles.slice(0, 5).map((item) => (
@@ -175,23 +181,14 @@ export function RightPanel({
               rel="noreferrer"
               target="_blank"
             >
-              <span className="news-source">{item.source}</span>
+              <span className="news-source">
+                {item.source}
+                {" · "}
+                {articleSentimentLabel(item.sentiment_score)} ({item.sentiment_score.toFixed(2)})
+              </span>
               <span className="news-title">{item.title}</span>
             </a>
           ))}
-        </div>
-        <div className="sentiment-subsection-title">Recent Market Sentiments</div>
-        <div className="sentiment-recent-list">
-          {!newsSentiment.articles.length && <div className="empty-state">No sentiment entries yet</div>}
-          {newsSentiment.articles.slice(0, 5).map((item) => {
-            const label = articleSentimentLabel(item.sentiment_score);
-            return (
-              <div className="sentiment-recent-item" key={`sentiment-${item.source}-${item.url}-${item.title}`}>
-                <span className={`sentiment-mini-badge ${sentimentClassName(label)}`}>{label}</span>
-                <span className="sentiment-mini-title">{item.title}</span>
-              </div>
-            );
-          })}
         </div>
       </div>
 
@@ -225,6 +222,11 @@ export function RightPanel({
         open={llmExpanded}
         models={llmBreakdown.all_time}
         onClose={() => setLlmExpanded(false)}
+      />
+      <MarketSentimentModal
+        open={sentimentExpanded}
+        sentiment={newsSentiment}
+        onClose={() => setSentimentExpanded(false)}
       />
 
       <div className="panel-section glass lessons-panel">

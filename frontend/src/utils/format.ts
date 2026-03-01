@@ -22,3 +22,11 @@ export function formatUptime(startMs: number, nowMs: number): string {
   const ss = String(sec % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
 }
+
+export function formatPair(symbol: string): string {
+  const upper = String(symbol || "").toUpperCase();
+  if (upper.endsWith("USDT")) return `${upper.slice(0, -4)} / USDT`;
+  if (upper.endsWith("BTC")) return `${upper.slice(0, -3)} / BTC`;
+  if (upper.endsWith("ETH")) return `${upper.slice(0, -3)} / ETH`;
+  return upper;
+}

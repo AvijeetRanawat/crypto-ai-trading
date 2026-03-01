@@ -4,6 +4,7 @@ export interface SessionStartResponse {
 }
 
 export interface WarmupData {
+  symbol?: string;
   done: boolean;
   ticks: number;
   min_ticks: number;
@@ -82,6 +83,7 @@ export interface IntentData {
 }
 
 export interface RegimeData {
+  symbol?: string;
   regime: string;
   strength?: number;
   ema20?: number;
@@ -161,6 +163,7 @@ export interface NewsSentiment {
 }
 
 export const DEFAULT_WARMUP: WarmupData = {
+  symbol: "BTCUSDT",
   done: false,
   ticks: 0,
   min_ticks: 35,
@@ -192,6 +195,7 @@ export const DEFAULT_INTENT: IntentData = {
 };
 
 export const DEFAULT_REGIME: RegimeData = {
+  symbol: "BTCUSDT",
   regime: "WARMING_UP",
   verdict: "Loading...",
   atr_verdict: "ATR: -",
@@ -240,7 +244,7 @@ export const DEFAULT_NEWS_SENTIMENT: NewsSentiment = {
   articles: [],
   llm_summary: {
     text: "",
-    model_id: "gpt-5-nano",
+    model_id: "gpt-4.1-mini",
     timestamp: "",
     cached: true,
   },

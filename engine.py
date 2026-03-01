@@ -265,7 +265,7 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"Failed to save llm_usage: {e}")
 
-    def _sentiment_gate(self, proposed_dir: str):
+    def _sentiment_gate(self, symbol: str, proposed_dir: str):
         """
         Sentiment-aware entry gate.
         Returns: (allowed: bool, verdict: str)
@@ -277,6 +277,7 @@ class TradingEngine:
             snapshot = build_sentiment_snapshot(
                 alpha_key=config.ALPHAVANTAGE_API_KEY,
                 cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+                symbol=symbol,
             )
             score = float(snapshot.get("sentiment_score", 0.0))
             label = str(snapshot.get("sentiment_label", "NEUTRAL"))
@@ -783,7 +784,7 @@ class TradingEngine:
                             continue
 
                         # ── Sentiment Gate ─────────────────────────────────
-                        sentiment_ok, sentiment_verdict = self._sentiment_gate(proposed_dir)
+                        sentiment_ok, sentiment_verdict = self._sentiment_gate(symbol, proposed_dir)
                         if not sentiment_ok:
                             self.skipped_cycles += 1
                             update_intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])

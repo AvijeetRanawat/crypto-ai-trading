@@ -40,13 +40,13 @@ BINANCE_API_KEY=your_binance_key
 BINANCE_API_SECRET=your_binance_secret
 
 TRADING_MODE=SIMULATION
-BLUE_CHIP_WHITELIST=BTCUSDT
+BLUE_CHIP_WHITELIST=BTCUSDT,ETHUSDT,SOLUSDT,ETHBTC,SOLBTC,SOLETH
 
 LLM_PROVIDER=OPENAI
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL_ID=gpt-4o
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-5-nano
+OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-4.1-mini
 
 # Optional news/sentiment API keys
 ALPHAVANTAGE_API_KEY=your_alphavantage_api_key
@@ -85,6 +85,7 @@ python run.py
 `run.py` starts:
 - Dashboard API + frontend on port `8000`
 - Trading engine loop
+- Auto-restart watcher for backend file changes (`AUTO_RESTART_ON_BACKEND_CHANGES=true`)
 
 Open in browser:
 - `http://localhost:8000`

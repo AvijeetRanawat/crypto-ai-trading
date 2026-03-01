@@ -115,7 +115,7 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4.1-mini")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    OPENAI_NEWS_SUMMARY_MODEL_ID = os.getenv("OPENAI_NEWS_SUMMARY_MODEL_ID", "gpt-5-nano")
+    OPENAI_NEWS_SUMMARY_MODEL_ID = os.getenv("OPENAI_NEWS_SUMMARY_MODEL_ID", "gpt-4.1-mini")
     ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
     CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")
 
@@ -138,7 +138,7 @@ class Config:
     # ── Asset Focus ──
     BLUE_CHIP_WHITELIST = [
         s.strip().upper()
-        for s in os.getenv("BLUE_CHIP_WHITELIST", "BTCUSDT").split(",")
+        for s in os.getenv("BLUE_CHIP_WHITELIST", "BTCUSDT,ETHUSDT,SOLUSDT,ETHBTC,SOLBTC,SOLETH").split(",")
         if s.strip()
     ]
 

@@ -22,8 +22,6 @@ app.add_middleware(
 )
 import time
 
-MARKET_SENTIMENT_PATHS = {"/api/news/sentiment", "/api/news/headlines"}
-
 # ── Session start time — set once when this process boots ────────────────────
 SESSION_START = datetime.now().isoformat()
 SESSION_START_MS = int(time.time() * 1000)
@@ -39,27 +37,70 @@ def _db():
 
 
 @app.middleware("http")
-async def log_market_sentiment_requests(request, call_next):
+async def log_all_api_requests(request, call_next):
     path = request.url.path
-    should_log = path in MARKET_SENTIMENT_PATHS
-    started = time.time()
+    if not path.startswith("/api/"):
+        return await call_next(request)
 
-    if should_log:
-        query = request.url.query
-        suffix = f"?{query}" if query else ""
-        logger.info(f"API_REQ {request.method} {path}{suffix}")
+    started = time.perf_counter()
+    request_id = f"{int(time.time() * 1000)}-{abs(hash((request.method, path, request.url.query))) % 10000}"
+    query = request.url.query or "-"
+    client_host = request.client.host if request.client else "-"
+    user_agent = request.headers.get("user-agent", "-")
+    forwarded_for = request.headers.get("x-forwarded-for", "-")
+    referer = request.headers.get("referer", "-")
+
+    logger.info(
+        "API_REQ id=%s method=%s path=%s query=%s client=%s xff=%s ua=%s referer=%s",
+        request_id,
+        request.method,
+        path,
+        query,
+        client_host,
+        forwarded_for,
+        user_agent,
+        referer,
+    )
 
     try:
         response = await call_next(request)
-    except Exception:
-        if should_log:
-            duration_ms = int((time.time() - started) * 1000)
-            logger.error(f"API_RES {request.method} {path} -> 500 ({duration_ms}ms)")
+    except Exception as e:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.error(
+            "API_ERR id=%s method=%s path=%s query=%s duration_ms=%s error=%s",
+            request_id,
+            request.method,
+            path,
+            query,
+            duration_ms,
+            e,
+            exc_info=True,
+        )
         raise
 
-    if should_log:
-        duration_ms = int((time.time() - started) * 1000)
-        logger.info(f"API_RES {request.method} {path} -> {response.status_code} ({duration_ms}ms)")
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    content_length = response.headers.get("content-length", "-")
+    content_type = response.headers.get("content-type", "-")
+    logger.info(
+        "API_RES id=%s method=%s path=%s status=%s duration_ms=%s bytes=%s content_type=%s",
+        request_id,
+        request.method,
+        path,
+        response.status_code,
+        duration_ms,
+        content_length,
+        content_type,
+    )
+
+    if response.status_code >= 400:
+        logger.warning(
+            "API_WARN id=%s method=%s path=%s status=%s",
+            request_id,
+            request.method,
+            path,
+            response.status_code,
+        )
+
     return response
 
 
@@ -77,19 +118,23 @@ async def session_start():
 
 
 @app.get("/api/warmup")
-async def get_warmup():
+async def get_warmup(symbol: str = "BTCUSDT"):
     """Return warmup progress: how many price ticks collected vs the 35 needed."""
     MIN_TICKS = 35
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
     conn = _db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT COUNT(*) FROM prices WHERE symbol='BTCUSDT' AND timestamp >= ?",
-        (SESSION_START,)
+        "SELECT COUNT(*) FROM prices WHERE symbol=? AND timestamp >= ?",
+        (symbol, SESSION_START)
     )
     ticks = cur.fetchone()[0]
     conn.close()
     done = ticks >= MIN_TICKS
     return {
+        "symbol": symbol,
         "ticks": min(ticks, MIN_TICKS),
         "min_ticks": MIN_TICKS,
         "pct": min(100, round(ticks / MIN_TICKS * 100)),
@@ -240,6 +285,9 @@ async def get_portfolio_summary():
 @app.get("/api/market/history")
 async def get_market_history(symbol: str = "BTCUSDT"):
     """Price chart — session only."""
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
@@ -285,7 +333,7 @@ async def get_intent():
 
 
 @app.get("/api/logs")
-async def get_logs(lines: int = 60):
+async def get_logs(lines: int = 120):
     """Read from the consolidated trading.log file (cleared on restart)."""
     log_path = os.path.join(os.path.dirname(__file__), "trading.log")
     if not os.path.exists(log_path):
@@ -429,9 +477,12 @@ async def get_llm_breakdown():
 
 
 @app.get("/api/regime")
-async def get_regime():
+async def get_regime(symbol: str = "BTCUSDT"):
     """Run regime/ATR/session snapshot from latest prices in DB."""
     from strategies.tools import MarketRegimeDetector, ATRTracker, SessionTimeFilter
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
 
     session = SessionTimeFilter.analyze()
 
@@ -439,8 +490,9 @@ async def get_regime():
         conn = sqlite3.connect(database.DB_PATH)
         cur = conn.cursor()
         cur.execute(
-            "SELECT price FROM prices WHERE symbol='BTCUSDT' "
+            "SELECT price FROM prices WHERE symbol=? "
             "ORDER BY timestamp DESC LIMIT 200"
+            , (symbol,)
         )
         rows = cur.fetchall()
         conn.close()
@@ -478,15 +530,20 @@ async def get_regime():
         "session":         session["session"],
         "session_quality": session["quality"],
         "session_verdict": session["verdict"],
+        "symbol": symbol,
     }
 
 
 @app.get("/api/news/sentiment")
-async def get_news_sentiment():
+async def get_news_sentiment(symbol: str = "BTCUSDT"):
     """Aggregated BTC sentiment from free news/sentiment sources."""
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
     snapshot = build_sentiment_snapshot(
         alpha_key=config.ALPHAVANTAGE_API_KEY,
         cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+        symbol=symbol,
     )
     try:
         snapshot, usage_event = summarize_sentiment_with_openai(
@@ -506,10 +563,11 @@ async def get_news_sentiment():
                 total_tokens=int(usage_event.get("total_tokens", 0)),
                 latency_ms=int(usage_event.get("latency_ms", 0)),
                 estimated_cost_usd=float(usage_event.get("estimated_cost_usd", 0.0)),
-                symbol="BTCUSDT",
+                symbol=symbol,
                 decision_context="dashboard_sentiment_summary",
             )
     except Exception as e:
+        logger.error(f"News sentiment summary failed for {symbol}: {e}", exc_info=True)
         snapshot["llm_summary"] = {
             "text": f"LLM summary unavailable: {e}",
             "model_id": config.OPENAI_NEWS_SUMMARY_MODEL_ID,
@@ -520,11 +578,15 @@ async def get_news_sentiment():
 
 
 @app.get("/api/news/headlines")
-async def get_news_headlines(limit: int = 8):
+async def get_news_headlines(symbol: str = "BTCUSDT", limit: int = 8):
     """Latest BTC/crypto headlines from aggregated sources."""
+    symbol = str(symbol).upper()
+    if not config.is_symbol_allowed(symbol):
+        symbol = "BTCUSDT"
     snapshot = build_sentiment_snapshot(
         alpha_key=config.ALPHAVANTAGE_API_KEY,
         cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+        symbol=symbol,
     )
     safe_limit = max(1, min(25, int(limit)))
     return {

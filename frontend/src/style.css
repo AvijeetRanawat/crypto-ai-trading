@@ -234,6 +234,16 @@ body {
     letter-spacing: 1px;
 }
 
+.symbol-select {
+    border: 1px solid var(--border);
+    background: var(--tile-bg);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 6px;
+}
+
 .live-price {
     font-family: var(--mono);
     font-size: 22px;
@@ -656,7 +666,7 @@ body {
     position: fixed;
     inset: 0;
     z-index: 3000;
-    background: rgba(0, 0, 0, 0.55);
+    background: rgba(0, 0, 0, 0.9);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -858,6 +868,76 @@ body {
     color: var(--text);
     font-size: 10px;
     line-height: 1.25;
+}
+
+.sentiment-modal-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+}
+
+.sentiment-modal-stat {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--tile-bg);
+    padding: 0.35rem 0.45rem;
+    font-size: 10px;
+}
+
+.sentiment-modal-key {
+    color: var(--muted);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.sentiment-source-row {
+    margin-top: 0.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.sentiment-source-pill {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 9px;
+    letter-spacing: 0.04em;
+}
+
+.sentiment-source-pill.ok {
+    color: var(--green);
+    border-color: var(--green);
+}
+
+.sentiment-source-pill.down {
+    color: var(--red);
+    border-color: var(--red);
+}
+
+.sentiment-modal-list {
+    margin-top: 0.3rem;
+}
+
+.sentiment-modal-item {
+    margin-bottom: 0.25rem;
+}
+
+.sentiment-modal-item-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.sentiment-modal-time {
+    color: var(--muted);
+    font-size: 9px;
+    margin-top: 2px;
 }
 
 /* ── LESSONS ── */
