@@ -26,9 +26,21 @@ def _env_int(name: str, default: int) -> int:
 
 
 class Config:
-    API_KEY = os.getenv("COINDCX_API_KEY", "")
-    API_SECRET = os.getenv("COINDCX_API_SECRET")
+    EXCHANGE = os.getenv("EXCHANGE", "COINDCX").strip().upper()
+    if EXCHANGE not in {"COINDCX", "BINANCE"}:
+        EXCHANGE = "COINDCX"
+
+    COINDCX_API_KEY = os.getenv("COINDCX_API_KEY", "")
+    COINDCX_API_SECRET = os.getenv("COINDCX_API_SECRET")
+    BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+    BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", os.getenv("BINANCE_SECRET_KEY"))
+
+    API_KEY = BINANCE_API_KEY if EXCHANGE == "BINANCE" else COINDCX_API_KEY
+    API_SECRET = BINANCE_API_SECRET if EXCHANGE == "BINANCE" else COINDCX_API_SECRET
     TRADING_MODE = os.getenv("TRADING_MODE", "SIMULATION")
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "BEDROCK").strip().upper()
+    if LLM_PROVIDER not in {"BEDROCK", "OPENAI"}:
+        LLM_PROVIDER = "BEDROCK"
 
     # ── Ensemble Weights ──
     WEIGHT_MOMENTUM = _env_float("WEIGHT_MOMENTUM", 0.35)
@@ -96,15 +108,23 @@ class Config:
     # ── AWS Bedrock LLM ──
     BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
     HAIKU_MODEL_ID = os.getenv("HAIKU_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4.1-mini")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     # Approximate costs (USD / 1M tokens), used for runtime budgeting
     SONNET_INPUT_USD_PER_1M = _env_float("SONNET_INPUT_USD_PER_1M", 3.00)
     SONNET_OUTPUT_USD_PER_1M = _env_float("SONNET_OUTPUT_USD_PER_1M", 15.00)
     HAIKU_INPUT_USD_PER_1M = _env_float("HAIKU_INPUT_USD_PER_1M", 0.80)
     HAIKU_OUTPUT_USD_PER_1M = _env_float("HAIKU_OUTPUT_USD_PER_1M", 4.00)
+    OPENAI_INPUT_USD_PER_1M = _env_float("OPENAI_INPUT_USD_PER_1M", 0.40)
+    OPENAI_OUTPUT_USD_PER_1M = _env_float("OPENAI_OUTPUT_USD_PER_1M", 1.60)
 
     # ── API ──
-    REST_BASE_URL = os.getenv("REST_BASE_URL", "https://api.coindcx.com")
+    COINDCX_REST_BASE_URL = os.getenv("COINDCX_REST_BASE_URL", "https://api.coindcx.com")
+    BINANCE_REST_BASE_URL = os.getenv("BINANCE_REST_BASE_URL", "https://api.binance.us")
+    DEFAULT_REST_BASE_URL = BINANCE_REST_BASE_URL if EXCHANGE == "BINANCE" else COINDCX_REST_BASE_URL
+    REST_BASE_URL = os.getenv("REST_BASE_URL", DEFAULT_REST_BASE_URL)
 
     # ── Asset Focus ──
     BLUE_CHIP_WHITELIST = [

@@ -6,7 +6,7 @@ from logger import logger
 from database import init_db
 
 async def main():
-    logger.info("Initializing CoinDCX Trading Agent with WebSocket support...")
+    logger.info(f"Initializing {config.EXCHANGE} Trading Agent with WebSocket support...")
     init_db()
     
     engine = TradingEngine(client)

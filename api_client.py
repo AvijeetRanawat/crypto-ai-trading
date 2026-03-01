@@ -5,8 +5,17 @@ from config import config
 from logger import logger
 import database
 
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class CoinDCXClient:
     def __init__(self):
+        self.exchange = config.EXCHANGE
         self.base_url = config.REST_BASE_URL
         self.latest_prices = {}   # {symbol: price}
         self.ticker_meta = {}     # {symbol: {change_24h, volume, high, low}}
@@ -15,9 +24,33 @@ class CoinDCXClient:
         self.headers = {
             'User-Agent': 'curl/8.6.0',
             'Connection': 'close',
-            'X-Auth-Apikey': config.API_KEY,
         }
+        if config.API_KEY:
+            if self.exchange == "BINANCE":
+                self.headers['X-MBX-APIKEY'] = config.API_KEY
+            else:
+                self.headers['X-Auth-Apikey'] = config.API_KEY
         self._drift_alerted = set()
+        self._binance_us_fallback_applied = False
+
+    def _is_http_451(self, err) -> bool:
+        resp = getattr(err, "response", None)
+        return bool(resp is not None and int(getattr(resp, "status_code", 0) or 0) == 451)
+
+    def _try_binance_us_fallback(self) -> bool:
+        if self.exchange != "BINANCE" or self._binance_us_fallback_applied:
+            return False
+        old = str(self.base_url or "").rstrip("/")
+        if old == "https://api.binance.us":
+            self._binance_us_fallback_applied = True
+            return False
+        self.base_url = "https://api.binance.us"
+        self._binance_us_fallback_applied = True
+        logger.warning(
+            "Received HTTP 451 from Binance endpoint. "
+            f"Switching REST base URL from {old} to {self.base_url}."
+        )
+        return True
 
     def _get_with_retry(self, url, retries=3, timeout=20):
         """GET request with exponential backoff."""
@@ -31,6 +64,15 @@ class CoinDCXClient:
                 wait = 2 ** attempt
                 logger.warning(f"API retry {attempt+1}/{retries}: {type(e).__name__}. Wait {wait}s...")
                 time.sleep(wait)
+            except requests.exceptions.HTTPError as e:
+                if self._is_http_451(e) and self._try_binance_us_fallback():
+                    failed_url = str(getattr(getattr(e, "response", None), "url", "") or "")
+                    failed_base = failed_url.split("/api/")[0].rstrip("/") if "/api/" in failed_url else ""
+                    if failed_base:
+                        url = url.replace(failed_base, self.base_url.rstrip("/"))
+                    continue
+                logger.error(f"API error: {e}")
+                return None
             except Exception as e:
                 logger.error(f"API error: {e}")
                 return None
@@ -39,16 +81,70 @@ class CoinDCXClient:
 
     def get_market_ticker(self):
         """Fetches ticker data for all markets."""
+        if self.exchange == "BINANCE":
+            result = self._get_with_retry(f"{self.base_url}/api/v3/ticker/24hr")
+            return self._normalize_binance_tickers(result)
         result = self._get_with_retry(f"{self.base_url}/exchange/ticker")
         return result if result else []
 
+    def _normalize_binance_tickers(self, tickers):
+        if not isinstance(tickers, list):
+            return []
+        normalized = []
+        for t in tickers:
+            symbol = str(t.get("symbol", "")).upper()
+            if not symbol:
+                continue
+            normalized.append({
+                "market": symbol,
+                "last_price": _safe_float(t.get("lastPrice")),
+                "high": _safe_float(t.get("highPrice")),
+                "low": _safe_float(t.get("lowPrice")),
+                "volume": _safe_float(t.get("volume")),
+                "change_24_hour": _safe_float(t.get("priceChangePercent")),
+                "bid": _safe_float(t.get("bidPrice")),
+                "ask": _safe_float(t.get("askPrice")),
+                "timestamp": t.get("closeTime"),
+            })
+        return normalized
+
     def get_historical_klines(self, symbol, interval='1m', limit=60):
-        """Fetches historical k-lines (candles) for immediate warmup.
-        For CoinDCX, the pair format is B-BTC_USDT.
-        https://public.coindcx.com/market_data/candles?pair=B-BTC_USDT&interval=1m
-        """
+        """Fetches historical k-lines (candles) for immediate warmup."""
+        if self.exchange == "BINANCE":
+            url = f"{self.base_url}/api/v3/klines?symbol={str(symbol).upper()}&interval={interval}&limit={limit}"
+            try:
+                resp = requests.get(url, timeout=10, headers=self.headers)
+                resp.raise_for_status()
+                data = resp.json()
+                if data and isinstance(data, list):
+                    closes = [
+                        _safe_float(k[4])
+                        for k in data[-limit:]
+                        if isinstance(k, (list, tuple)) and len(k) > 4
+                    ]
+                    return closes
+                return []
+            except requests.exceptions.HTTPError as e:
+                if self._is_http_451(e) and self._try_binance_us_fallback():
+                    return self.get_historical_klines(symbol, interval=interval, limit=limit)
+                logger.warning(f"Failed to fetch historical klines for {symbol}: {e}")
+                return []
+            except Exception as e:
+                logger.warning(f"Failed to fetch historical klines for {symbol}: {e}")
+                return []
+
+        # CoinDCX pair format example: B-BTC_USDT
         public_url = "https://public.coindcx.com"
-        fmt_symbol = f"B-{symbol[:3]}_{symbol[3:]}" if symbol.endswith("USDT") else f"I-{symbol[:3]}_{symbol[3:]}"
+        symbol = str(symbol).upper()
+        if symbol.endswith("USDT"):
+            base = symbol[:-4]
+            quote = "USDT"
+            market_prefix = "B"
+        else:
+            base = symbol[:-3]
+            quote = symbol[-3:]
+            market_prefix = "I"
+        fmt_symbol = f"{market_prefix}-{base}_{quote}"
         url = f"{public_url}/market_data/candles?pair={fmt_symbol}&interval={interval}"
         
         # We need raw requests as it's a different base URL
@@ -75,7 +171,7 @@ class CoinDCXClient:
             dropped = sorted(requested - set(self.monitored_channels))
             if dropped:
                 logger.warning(f"Dropped non-allowlisted channels: {dropped}")
-        logger.info(f"Starting Price Feed ({config.POLL_INTERVAL_SECONDS}s interval)...")
+        logger.info(f"Starting {self.exchange} Price Feed ({config.POLL_INTERVAL_SECONDS}s interval)...")
         while True:
             try:
                 tickers = self.get_market_ticker()

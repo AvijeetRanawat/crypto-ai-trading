@@ -152,18 +152,29 @@ class TradingEngine:
         self.llm_agent = None
         self.retro_agent = None
         self.meta_optimizer = None
+        self.missed_analyzer = None
         try:
             self.llm_agent = LLMAgent()
-            if self.llm_agent.bedrock:
-                if config.ENABLE_RETROSPECTIVE:
-                    self.retro_agent = RetrospectiveAgent(self.llm_agent.bedrock)
-                if config.ENABLE_META_OPTIMIZER:
-                    self.meta_optimizer = MetaOptimizer(self.llm_agent.bedrock)
-                if config.ENABLE_MISSED_OPPORTUNITY_ANALYZER:
-                    self.missed_analyzer = MissedOpportunityAnalyzer(self.llm_agent.bedrock, config.BEDROCK_MODEL_ID)
-                logger.info("✅ Engine initialized with LLM (profit-first mode)")
+            if self.llm_agent and self.llm_agent.ready:
+                if self.llm_agent.provider == "BEDROCK" and self.llm_agent.bedrock:
+                    if config.ENABLE_RETROSPECTIVE:
+                        self.retro_agent = RetrospectiveAgent(self.llm_agent.bedrock)
+                    if config.ENABLE_META_OPTIMIZER:
+                        self.meta_optimizer = MetaOptimizer(self.llm_agent.bedrock)
+                    if config.ENABLE_MISSED_OPPORTUNITY_ANALYZER:
+                        self.missed_analyzer = MissedOpportunityAnalyzer(self.llm_agent.bedrock, config.BEDROCK_MODEL_ID)
+                elif (
+                    config.ENABLE_RETROSPECTIVE
+                    or config.ENABLE_META_OPTIMIZER
+                    or config.ENABLE_MISSED_OPPORTUNITY_ANALYZER
+                ):
+                    logger.warning(
+                        "Retrospective/meta/missed-opportunity analyzers are Bedrock-only and were skipped "
+                        f"for provider={self.llm_agent.provider}."
+                    )
+                logger.info(f"✅ Engine initialized with LLM provider={self.llm_agent.provider} (profit-first mode)")
             else:
-                logger.error("Bedrock failed.")
+                logger.error("LLM provider initialization failed.")
         except Exception as e:
             logger.error(f"Failed to load LLM: {e}")
 
@@ -386,7 +397,12 @@ class TradingEngine:
             try:
                 await asyncio.sleep(60)   # Tick every 60 seconds
 
-                if not self.llm_agent or not self.llm_agent.bedrock:
+                if (
+                    not self.llm_agent
+                    or not self.llm_agent.ready
+                    or self.llm_agent.provider != "BEDROCK"
+                    or not self.llm_agent.bedrock
+                ):
                     continue
 
                 now             = datetime.now()

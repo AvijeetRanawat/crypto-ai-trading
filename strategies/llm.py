@@ -1,6 +1,7 @@
 import json
 import time
 import boto3
+import requests
 from strategies.base import BaseStrategy, Signal
 from config import config
 from logger import logger
@@ -46,11 +47,24 @@ class LLMAgent(BaseStrategy):
     def __init__(self):
         super().__init__("LLM", config.WEIGHT_LLM)
         self.weight = config.WEIGHT_LLM
+        self.provider = config.LLM_PROVIDER
+        self.ready = False
         self.cache_hits = 0
         self.haiku_rejects = 0
+        self.bedrock = None
+        self.openai_api_key = config.OPENAI_API_KEY
+
+        if self.provider == "OPENAI":
+            if not self.openai_api_key:
+                logger.error("OPENAI provider selected but OPENAI_API_KEY is not set.")
+                return
+            self.ready = True
+            logger.info(f"Initialized OpenAI client for model: {config.OPENAI_MODEL_ID}")
+            return
 
         try:
             self.bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+            self.ready = True
             logger.info(f"Initialized AWS Bedrock client for model: {config.BEDROCK_MODEL_ID}")
         except Exception as e:
             logger.error(f"Failed to initialize boto3 Bedrock client: {e}")
@@ -95,9 +109,58 @@ class LLMAgent(BaseStrategy):
         return "".join(parts)
 
     def _pricing_per_1m(self, model_id: str) -> tuple:
+        if self.provider == "OPENAI":
+            return config.OPENAI_INPUT_USD_PER_1M, config.OPENAI_OUTPUT_USD_PER_1M
         if "haiku" in (model_id or "").lower():
             return config.HAIKU_INPUT_USD_PER_1M, config.HAIKU_OUTPUT_USD_PER_1M
         return config.SONNET_INPUT_USD_PER_1M, config.SONNET_OUTPUT_USD_PER_1M
+
+    def _invoke_openai_with_usage(
+        self,
+        model_id: str,
+        stage: str,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> tuple:
+        started = time.time()
+        resp = requests.post(
+            f"{config.OPENAI_BASE_URL.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        latency_ms = int((time.time() - started) * 1000)
+
+        choices = payload.get("choices") or []
+        msg = choices[0].get("message", {}) if choices else {}
+        text = msg.get("content", "") or ""
+        usage = payload.get("usage", {}) or {}
+        in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or _estimate_tokens(prompt))
+        out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or _estimate_tokens(text))
+        total_tok = int(usage.get("total_tokens") or (in_tok + out_tok))
+        in_price, out_price = self._pricing_per_1m(model_id)
+        cost = round((in_tok / 1_000_000) * in_price + (out_tok / 1_000_000) * out_price, 8)
+        usage_event = {
+            "stage": stage,
+            "model_id": model_id,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": total_tok,
+            "latency_ms": latency_ms,
+            "estimated_cost_usd": cost,
+        }
+        return text, usage_event
 
     def _invoke_with_usage(
         self,
@@ -107,6 +170,9 @@ class LLMAgent(BaseStrategy):
         max_tokens: int,
         temperature: float,
     ) -> tuple:
+        if self.provider == "OPENAI":
+            return self._invoke_openai_with_usage(model_id, stage, prompt, max_tokens, temperature)
+
         started = time.time()
         response = self.bedrock.invoke_model(
             body=json.dumps(
@@ -160,7 +226,7 @@ class LLMAgent(BaseStrategy):
         Cheap Haiku pre-gate: should we even bother calling Sonnet?
         Returns (passes, usage_event_or_none).
         """
-        if not self.bedrock:
+        if self.provider != "BEDROCK" or not self.bedrock:
             return True, None
 
         direction = "BUY" if buy_votes >= sell_votes else "SELL"
@@ -207,8 +273,8 @@ class LLMAgent(BaseStrategy):
         bb_pct=50.0,
     ) -> Signal:
         usage_events = []
-        if not self.bedrock or len(history) < 2:
-            return Signal("NEUTRAL", 0.0, self.weight, "Bedrock not ready.", meta={"llm_usage": usage_events})
+        if not self.ready or len(history) < 2:
+            return Signal("NEUTRAL", 0.0, self.weight, "LLM not ready.", meta={"llm_usage": usage_events})
 
         key = _cache_key(rsi, macd, bb_pct, buy_count, sell_count, regime)
         if key in _response_cache:
@@ -288,9 +354,10 @@ Output strictly valid JSON (no markdown):
 }}"""
 
         try:
-            logger.info(f"🧠 Querying Claude Sonnet for {symbol} ({buy_count}B/{sell_count}S | regime={regime})...")
+            model_id = config.OPENAI_MODEL_ID if self.provider == "OPENAI" else config.BEDROCK_MODEL_ID
+            logger.info(f"🧠 Querying {self.provider} for {symbol} ({buy_count}B/{sell_count}S | regime={regime})...")
             llm_text, usage_event = self._invoke_with_usage(
-                model_id=config.BEDROCK_MODEL_ID,
+                model_id=model_id,
                 stage="sonnet_decision",
                 prompt=prompt,
                 max_tokens=200,
@@ -307,10 +374,10 @@ Output strictly valid JSON (no markdown):
                 action,
                 confidence,
                 self.weight,
-                f"Claude: {reason}",
+                f"{self.provider}: {reason}",
                 meta={"llm_usage": usage_events, "decision_source": "LLM_TIEBREAKER"},
             )
-            logger.info(f"🧠 Claude: {action} ({confidence:.2f}) — {reason}")
+            logger.info(f"🧠 {self.provider}: {action} ({confidence:.2f}) — {reason}")
             _response_cache[key] = (sig, time.time())
             return sig
 
@@ -324,15 +391,14 @@ Output strictly valid JSON (no markdown):
                 meta={"llm_usage": usage_events, "decision_source": "LLM_ERROR"},
             )
         except Exception as e:
-            logger.error(f"Bedrock API Error: {e}")
+            logger.error(f"LLM API Error ({self.provider}): {e}")
             return Signal(
                 "NEUTRAL",
                 0.0,
                 self.weight,
-                "AWS Error",
+                "LLM provider error",
                 meta={"llm_usage": usage_events, "decision_source": "LLM_ERROR"},
             )
 
     def analyze(self, symbol, current_price, history, meta) -> Signal:
         return self.analyze_with_tools(symbol, current_price, history, meta, [])
-
