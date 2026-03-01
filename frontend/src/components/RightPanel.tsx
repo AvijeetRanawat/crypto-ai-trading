@@ -173,22 +173,27 @@ export function RightPanel({
         <div className="sentiment-subsection-title">Latest News + Sentiment</div>
         <div className="news-list">
           {!newsSentiment.articles.length && <div className="empty-state">No news data yet</div>}
-          {newsSentiment.articles.slice(0, 5).map((item) => (
-            <a
-              className="news-item"
-              href={item.url || "#"}
-              key={`${item.source}-${item.url}-${item.title}`}
-              rel="noreferrer"
-              target="_blank"
-            >
-              <span className="news-source">
-                {item.source}
-                {" · "}
-                {articleSentimentLabel(item.sentiment_score)} ({item.sentiment_score.toFixed(2)})
-              </span>
-              <span className="news-title">{item.title}</span>
-            </a>
-          ))}
+          {newsSentiment.articles.slice(0, 5).map((item) => {
+            const label = articleSentimentLabel(item.sentiment_score);
+            return (
+              <a
+                className="news-item"
+                href={item.url || "#"}
+                key={`${item.source}-${item.url}-${item.title}`}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <span className="news-source">
+                  {item.source}
+                  {" · "}
+                  <span className={`news-sentiment-tag ${sentimentClassName(label)}`}>
+                    {label} ({item.sentiment_score.toFixed(2)})
+                  </span>
+                </span>
+                <span className="news-title">{item.title}</span>
+              </a>
+            );
+          })}
         </div>
       </div>
 

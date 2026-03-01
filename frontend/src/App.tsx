@@ -4,6 +4,7 @@ import { LogsPanel } from "./components/LogsPanel";
 import { RightPanel } from "./components/RightPanel";
 import { TopBar } from "./components/TopBar";
 import { useDashboardData } from "./hooks/useDashboardData";
+import { useResizableLogs } from "./hooks/useResizableLogs";
 import { useResizablePanel } from "./hooks/useResizablePanel";
 import { useTheme } from "./hooks/useTheme";
 import { formatUptime } from "./utils/format";
@@ -30,6 +31,7 @@ function App() {
   } = useDashboardData(selectedSymbol);
 
   const { panelWidth, onResizeMouseDown } = useResizablePanel();
+  const { logsHeight, onResizeMouseDown: onLogsResizeMouseDown } = useResizableLogs();
 
   const balance = useMemo(() => 1250 + Number(summary.total_pnl || 0), [summary.total_pnl]);
   const uptime = useMemo(() => formatUptime(startTimeMs, nowMs), [startTimeMs, nowMs]);
@@ -71,7 +73,8 @@ function App() {
         />
       </main>
 
-      <LogsPanel logs={logs} />
+      <div id="h-resizer" className="resizer-h" onMouseDown={onLogsResizeMouseDown} />
+      <LogsPanel logs={logs} height={logsHeight} />
     </div>
   );
 }

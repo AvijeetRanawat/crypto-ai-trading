@@ -3,6 +3,7 @@ export const API_BASE = "/api";
 export const STORAGE_KEYS = {
   theme: "dashboard-theme",
   panelWidth: "ai-panel-width",
+  logsHeight: "logs-height",
   sessionStart: "tradingSessionStart",
   sessionStartMs: "tradingSessionStartMs",
 } as const;
