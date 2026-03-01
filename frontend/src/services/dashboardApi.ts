@@ -1,9 +1,11 @@
 import { API_BASE } from "../utils/constants";
 import type {
   IntentData,
+  LlmBreakdown,
   Lesson,
   LlmSummary,
   MarketPoint,
+  NewsSentiment,
   PortfolioSummary,
   RegimeData,
   SessionStartResponse,
@@ -38,4 +40,6 @@ export const dashboardApi = {
   lessons: () => fetchJson<Lesson[]>(`${API_BASE}/lessons`),
   logs: (lines = 60) => fetchJson<{ logs: string[] }>(`${API_BASE}/logs?lines=${lines}`),
   llmSummary: () => fetchJson<LlmSummary>(`${API_BASE}/llm/summary`),
+  llmBreakdown: () => fetchJson<LlmBreakdown>(`${API_BASE}/llm/breakdown`),
+  newsSentiment: () => fetchJson<NewsSentiment>(`${API_BASE}/news/sentiment`),
 };

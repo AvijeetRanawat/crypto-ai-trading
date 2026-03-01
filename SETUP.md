@@ -46,6 +46,15 @@ LLM_PROVIDER=OPENAI
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL_ID=gpt-4o
 OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-5-nano
+
+# Optional news/sentiment API keys
+ALPHAVANTAGE_API_KEY=your_alphavantage_api_key
+CRYPTOCOMPARE_API_KEY=your_cryptocompare_api_key
+ENABLE_SENTIMENT_GATE=true
+SENTIMENT_MIN_ABS_SCORE=0.08
+SENTIMENT_DIRECTIONAL_FLOOR=0.05
+SENTIMENT_MIN_ARTICLES=3
 ```
 
 ### Optional Bedrock setup
@@ -98,6 +107,7 @@ curl http://localhost:8000/api/session_start
 curl http://localhost:8000/api/portfolio/summary
 curl http://localhost:8000/api/logs?lines=20
 curl http://localhost:8000/api/llm/summary
+curl http://localhost:8000/api/news/sentiment
 ```
 
 ## 6. Stop the App

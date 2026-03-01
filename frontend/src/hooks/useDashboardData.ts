@@ -2,14 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { dashboardApi } from "../services/dashboardApi";
 import {
   DEFAULT_INTENT,
+  DEFAULT_LLM_BREAKDOWN,
   DEFAULT_LLM_SUMMARY,
+  DEFAULT_NEWS_SENTIMENT,
   DEFAULT_REGIME,
   DEFAULT_SUMMARY,
   DEFAULT_WARMUP,
   type IntentData,
+  type LlmBreakdown,
   type Lesson,
   type LlmSummary,
   type MarketPoint,
+  type NewsSentiment,
   type PortfolioSummary,
   type RegimeData,
   type SignalEvent,
@@ -31,6 +35,8 @@ interface DashboardDataState {
   regime: RegimeData;
   logs: string;
   llmSummary: LlmSummary;
+  llmBreakdown: LlmBreakdown;
+  newsSentiment: NewsSentiment;
 }
 
 const FAST_POLL_MS = 3000;
@@ -53,6 +59,8 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
   const [regime, setRegime] = useState<RegimeData>(DEFAULT_REGIME);
   const [logs, setLogs] = useState("...");
   const [llmSummary, setLlmSummary] = useState<LlmSummary>(DEFAULT_LLM_SUMMARY);
+  const [llmBreakdown, setLlmBreakdown] = useState<LlmBreakdown>(DEFAULT_LLM_BREAKDOWN);
+  const [newsSentiment, setNewsSentiment] = useState<NewsSentiment>(DEFAULT_NEWS_SENTIMENT);
 
   const sessionStartRef = useRef<string | null>(localStorage.getItem(STORAGE_KEYS.sessionStart));
 
@@ -66,6 +74,8 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     setLogs("...");
     setSummary({ ...DEFAULT_SUMMARY });
     setLlmSummary({ ...DEFAULT_LLM_SUMMARY });
+    setLlmBreakdown({ ...DEFAULT_LLM_BREAKDOWN });
+    setNewsSentiment({ ...DEFAULT_NEWS_SENTIMENT });
   }, []);
 
   const syncSessionStart = useCallback(async () => {
@@ -115,11 +125,13 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     };
 
     const slowPoll = async () => {
-      const [tradeData, lessonData, logData, usage] = await Promise.all([
+      const [tradeData, lessonData, logData, usage, breakdown, news] = await Promise.all([
         dashboardApi.tradesRecent(),
         dashboardApi.lessons(),
         dashboardApi.logs(60),
         dashboardApi.llmSummary(),
+        dashboardApi.llmBreakdown(),
+        dashboardApi.newsSentiment(),
       ]);
 
       if (!active) return;
@@ -127,6 +139,8 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
       if (lessonData) setLessons(lessonData);
       if (logData?.logs) setLogs(logData.logs.join("").trim());
       if (usage) setLlmSummary(usage);
+      if (breakdown) setLlmBreakdown(breakdown);
+      if (news) setNewsSentiment(news);
     };
 
     fastPoll();
@@ -157,5 +171,7 @@ export function useDashboardData(symbol = "BTCUSDT"): DashboardDataState {
     regime,
     logs,
     llmSummary,
+    llmBreakdown,
+    newsSentiment,
   };
 }

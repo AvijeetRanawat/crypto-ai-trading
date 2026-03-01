@@ -111,6 +111,55 @@ export interface LlmSummary {
   llm_trade_conversion_rate: number;
 }
 
+export interface LlmModelUsage {
+  model_id: string;
+  calls: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+export interface LlmBreakdown {
+  session: LlmModelUsage[];
+  today: LlmModelUsage[];
+  all_time: LlmModelUsage[];
+}
+
+export interface NewsHeadline {
+  source: string;
+  title: string;
+  url: string;
+  published_at: string | null;
+  sentiment_score: number;
+}
+
+export interface NewsSentiment {
+  updated_at: string;
+  symbol: string;
+  sentiment_score: number;
+  sentiment_label: string;
+  components: {
+    news_score: number;
+    fear_greed_score: number;
+    fear_greed: {
+      value: number | null;
+      value_classification: string;
+      sentiment_score: number;
+      timestamp?: string;
+    };
+    articles_count: number;
+    sources_available: Record<string, boolean>;
+  };
+  articles: NewsHeadline[];
+  llm_summary?: {
+    text: string;
+    model_id: string;
+    timestamp: string;
+    cached: boolean;
+  };
+}
+
 export const DEFAULT_WARMUP: WarmupData = {
   done: false,
   ticks: 0,
@@ -164,4 +213,35 @@ export const DEFAULT_LLM_SUMMARY: LlmSummary = {
   llm_decision_calls_session: 0,
   traded_signals: 0,
   llm_trade_conversion_rate: 0,
+};
+
+export const DEFAULT_LLM_BREAKDOWN: LlmBreakdown = {
+  session: [],
+  today: [],
+  all_time: [],
+};
+
+export const DEFAULT_NEWS_SENTIMENT: NewsSentiment = {
+  updated_at: "",
+  symbol: "BTCUSDT",
+  sentiment_score: 0,
+  sentiment_label: "NEUTRAL",
+  components: {
+    news_score: 0,
+    fear_greed_score: 0,
+    fear_greed: {
+      value: null,
+      value_classification: "Unknown",
+      sentiment_score: 0,
+    },
+    articles_count: 0,
+    sources_available: {},
+  },
+  articles: [],
+  llm_summary: {
+    text: "",
+    model_id: "gpt-5-nano",
+    timestamp: "",
+    cached: true,
+  },
 };

@@ -119,10 +119,19 @@ Common keys:
   - `LLM_PROVIDER=OPENAI` or `BEDROCK`
   - `OPENAI_API_KEY=...`
   - `OPENAI_MODEL_ID=gpt-4o` (or another supported model)
+  - `OPENAI_NEWS_SUMMARY_MODEL_ID=gpt-5-nano` (dashboard sentiment summarizer)
+- News/Sentiment:
+  - `ALPHAVANTAGE_API_KEY=...` (optional, used for `NEWS_SENTIMENT`)
+  - `CRYPTOCOMPARE_API_KEY=...` (optional)
+  - Free no-key feeds are also used: GDELT, Cointelegraph RSS, Fear & Greed
 - Safety controls:
   - `LLM_DAILY_BUDGET_USD`
   - `LLM_MAX_CALLS_PER_HOUR`
   - `MAX_DAILY_DRAWDOWN_USD`
+  - `ENABLE_SENTIMENT_GATE=true`
+  - `SENTIMENT_MIN_ABS_SCORE=0.08`
+  - `SENTIMENT_DIRECTIONAL_FLOOR=0.05`
+  - `SENTIMENT_MIN_ARTICLES=3`
 
 ## Dashboard/API Endpoints
 
@@ -138,6 +147,8 @@ Core endpoints:
 - `GET /api/signals/history?symbol=BTCUSDT&limit=200`
 - `GET /api/llm/summary`
 - `GET /api/regime`
+- `GET /api/news/sentiment`
+- `GET /api/news/headlines?limit=8`
 - `GET /api/intent`
 - `GET /api/logs?lines=60`
 
@@ -148,6 +159,9 @@ Static frontend is mounted at `/` from the `static/` directory.
 - `llm_tokens_today`
 - `llm_tokens_all_time`
 - `llm_calls_all_time`
+
+News sentiment summaries generated with `gpt-5-nano` are stored in `llm_usage`
+with stage `news_sentiment_summary`, and are included in token/cost totals.
 
 ## Data and Storage
 

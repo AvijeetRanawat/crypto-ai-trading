@@ -7,6 +7,10 @@ import sqlite3
 import os
 import json
 from datetime import datetime
+from config import config
+from news_sentiment import build_sentiment_snapshot, summarize_sentiment_with_openai
+from database import save_llm_usage
+from logger import logger
 
 app = FastAPI(title="Crypto AI Trading Dashboard")
 
@@ -17,6 +21,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 import time
+
+MARKET_SENTIMENT_PATHS = {"/api/news/sentiment", "/api/news/headlines"}
 
 # ── Session start time — set once when this process boots ────────────────────
 SESSION_START = datetime.now().isoformat()
@@ -30,6 +36,31 @@ def _db():
     conn = sqlite3.connect(database.DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@app.middleware("http")
+async def log_market_sentiment_requests(request, call_next):
+    path = request.url.path
+    should_log = path in MARKET_SENTIMENT_PATHS
+    started = time.time()
+
+    if should_log:
+        query = request.url.query
+        suffix = f"?{query}" if query else ""
+        logger.info(f"API_REQ {request.method} {path}{suffix}")
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        if should_log:
+            duration_ms = int((time.time() - started) * 1000)
+            logger.error(f"API_RES {request.method} {path} -> 500 ({duration_ms}ms)")
+        raise
+
+    if should_log:
+        duration_ms = int((time.time() - started) * 1000)
+        logger.info(f"API_RES {request.method} {path} -> {response.status_code} ({duration_ms}ms)")
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +380,54 @@ async def get_llm_summary():
     }
 
 
+@app.get("/api/llm/breakdown")
+async def get_llm_breakdown():
+    """Model-wise token/cost breakdown for session, today, and all-time."""
+    conn = _db()
+    cur = conn.cursor()
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    def _rows_for(where_clause: str, params: tuple):
+        cur.execute(
+            f"""
+            SELECT
+                COALESCE(model_id, 'unknown') AS model_id,
+                COUNT(*) AS calls,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(estimated_cost_usd), 0) AS cost_usd
+            FROM llm_usage
+            WHERE {where_clause}
+            GROUP BY COALESCE(model_id, 'unknown')
+            ORDER BY total_tokens DESC
+            """,
+            params,
+        )
+        return [
+            {
+                "model_id": r[0],
+                "calls": int(r[1] or 0),
+                "total_tokens": int(r[2] or 0),
+                "input_tokens": int(r[3] or 0),
+                "output_tokens": int(r[4] or 0),
+                "cost_usd": round(float(r[5] or 0.0), 6),
+            }
+            for r in cur.fetchall()
+        ]
+
+    session_rows = _rows_for("timestamp >= ? AND (session_id = ? OR session_id IS NULL)", (SESSION_START, SESSION_ID))
+    today_rows = _rows_for("timestamp >= ?", (midnight,))
+    all_time_rows = _rows_for("1=1", ())
+    conn.close()
+
+    return {
+        "session": session_rows,
+        "today": today_rows,
+        "all_time": all_time_rows,
+    }
+
+
 @app.get("/api/regime")
 async def get_regime():
     """Run regime/ATR/session snapshot from latest prices in DB."""
@@ -399,6 +478,60 @@ async def get_regime():
         "session":         session["session"],
         "session_quality": session["quality"],
         "session_verdict": session["verdict"],
+    }
+
+
+@app.get("/api/news/sentiment")
+async def get_news_sentiment():
+    """Aggregated BTC sentiment from free news/sentiment sources."""
+    snapshot = build_sentiment_snapshot(
+        alpha_key=config.ALPHAVANTAGE_API_KEY,
+        cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+    )
+    try:
+        snapshot, usage_event = summarize_sentiment_with_openai(
+            snapshot,
+            openai_api_key=config.OPENAI_API_KEY,
+            openai_base_url=config.OPENAI_BASE_URL,
+            model_id=config.OPENAI_NEWS_SUMMARY_MODEL_ID,
+            input_price_per_1m=config.OPENAI_NEWS_SUMMARY_INPUT_USD_PER_1M,
+            output_price_per_1m=config.OPENAI_NEWS_SUMMARY_OUTPUT_USD_PER_1M,
+        )
+        if usage_event:
+            save_llm_usage(
+                stage=usage_event.get("stage", "news_sentiment_summary"),
+                model_id=usage_event.get("model_id", config.OPENAI_NEWS_SUMMARY_MODEL_ID),
+                input_tokens=int(usage_event.get("input_tokens", 0)),
+                output_tokens=int(usage_event.get("output_tokens", 0)),
+                total_tokens=int(usage_event.get("total_tokens", 0)),
+                latency_ms=int(usage_event.get("latency_ms", 0)),
+                estimated_cost_usd=float(usage_event.get("estimated_cost_usd", 0.0)),
+                symbol="BTCUSDT",
+                decision_context="dashboard_sentiment_summary",
+            )
+    except Exception as e:
+        snapshot["llm_summary"] = {
+            "text": f"LLM summary unavailable: {e}",
+            "model_id": config.OPENAI_NEWS_SUMMARY_MODEL_ID,
+            "timestamp": datetime.now().isoformat(),
+            "cached": True,
+        }
+    return snapshot
+
+
+@app.get("/api/news/headlines")
+async def get_news_headlines(limit: int = 8):
+    """Latest BTC/crypto headlines from aggregated sources."""
+    snapshot = build_sentiment_snapshot(
+        alpha_key=config.ALPHAVANTAGE_API_KEY,
+        cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+    )
+    safe_limit = max(1, min(25, int(limit)))
+    return {
+        "updated_at": snapshot.get("updated_at"),
+        "sentiment_label": snapshot.get("sentiment_label"),
+        "sentiment_score": snapshot.get("sentiment_score"),
+        "headlines": (snapshot.get("articles") or [])[:safe_limit],
     }
 
 

@@ -29,6 +29,7 @@ from strategies.tools import (
     StochasticRSI, EMACross, VolumeMomentum,
 )
 import sys
+from news_sentiment import build_sentiment_snapshot
 
 # ─────────────────────────────────────────
 #  Paper Trading Simulator
@@ -263,6 +264,42 @@ class TradingEngine:
                 )
             except Exception as e:
                 logger.error(f"Failed to save llm_usage: {e}")
+
+    def _sentiment_gate(self, proposed_dir: str):
+        """
+        Sentiment-aware entry gate.
+        Returns: (allowed: bool, verdict: str)
+        """
+        if not config.ENABLE_SENTIMENT_GATE:
+            return True, "Sentiment gate disabled"
+
+        try:
+            snapshot = build_sentiment_snapshot(
+                alpha_key=config.ALPHAVANTAGE_API_KEY,
+                cryptocompare_key=config.CRYPTOCOMPARE_API_KEY,
+            )
+            score = float(snapshot.get("sentiment_score", 0.0))
+            label = str(snapshot.get("sentiment_label", "NEUTRAL"))
+            components = snapshot.get("components", {}) or {}
+            article_count = int(components.get("articles_count", 0) or 0)
+
+            # If feed coverage is thin, do not hard-block entries.
+            if article_count < config.SENTIMENT_MIN_ARTICLES:
+                return True, f"Sentiment thin ({article_count} articles)"
+
+            if abs(score) < config.SENTIMENT_MIN_ABS_SCORE:
+                return False, f"Sentiment weak ({score:+.2f})"
+
+            if proposed_dir == "LONG" and score < config.SENTIMENT_DIRECTIONAL_FLOOR:
+                return False, f"Sentiment opposes LONG ({label} {score:+.2f})"
+
+            if proposed_dir == "SHORT" and score > -config.SENTIMENT_DIRECTIONAL_FLOOR:
+                return False, f"Sentiment opposes SHORT ({label} {score:+.2f})"
+
+            return True, f"Sentiment supports {proposed_dir} ({label} {score:+.2f})"
+        except Exception as e:
+            logger.warning(f"Sentiment gate fallback: {e}")
+            return True, "Sentiment unavailable (TA-only fallback)"
 
     def _llm_budget_ok(self) -> tuple:
         calls_last_hour = get_llm_call_count_last_hour()
@@ -745,6 +782,26 @@ class TradingEngine:
                             )
                             continue
 
+                        # ── Sentiment Gate ─────────────────────────────────
+                        sentiment_ok, sentiment_verdict = self._sentiment_gate(proposed_dir)
+                        if not sentiment_ok:
+                            self.skipped_cycles += 1
+                            update_intent(f"📰 Sentiment reject: {sentiment_verdict}", [symbol])
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                buy_count,
+                                sell_count,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source="SENTIMENT_REJECT",
+                                deterministic_action=proposed_dir,
+                                deterministic_conf=max(buy_count, sell_count) / 8.0,
+                            )
+                            continue
+
                         # ── v6: ATR-BASED DYNAMIC STOPS ────────────────────
                         atr_result = self._safe_tool_call(
                             "ATRTracker",
@@ -809,6 +866,7 @@ class TradingEngine:
 
                         tool_outputs = [
                             {"name": "Market Regime", "data": f"{regime_result['verdict']} (strength: {regime_result['strength']})"},
+                            {"name": "Market Sentiment", "data": sentiment_verdict},
                             {"name": "ATR Tracker", "data": atr_result["verdict"]},
                             {"name": "Multi-Timeframe", "data": mtf_result["verdict"]},
                             {"name": "Session Filter", "data": session_filt["verdict"]},
@@ -1005,7 +1063,7 @@ class TradingEngine:
                         side = "LONG" if final_action == "BUY" else "SHORT"
                         reason = (
                             f"{decision_source}({final_conf:.2f}) | {buy_count}B/{sell_count}S | "
-                            f"{regime} | {session_filt['session']} | Edge:{expected_edge_pct:+.3f}% | "
+                            f"{regime} | {session_filt['session']} | {sentiment_verdict} | Edge:{expected_edge_pct:+.3f}% | "
                             f"ATR-SL:{dynamic_sl*100:.2f}%/TP:{dynamic_tp*100:.2f}% | {final_reason}"
                         )
 

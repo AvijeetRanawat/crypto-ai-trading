@@ -80,6 +80,10 @@ class Config:
     LLM_DAILY_BUDGET_USD = _env_float("LLM_DAILY_BUDGET_USD", 5.0)
     LLM_MAX_CALLS_PER_HOUR = _env_int("LLM_MAX_CALLS_PER_HOUR", 8)
     MAX_DAILY_DRAWDOWN_USD = _env_float("MAX_DAILY_DRAWDOWN_USD", 25.0)
+    ENABLE_SENTIMENT_GATE = _env_bool("ENABLE_SENTIMENT_GATE", True)
+    SENTIMENT_MIN_ABS_SCORE = _env_float("SENTIMENT_MIN_ABS_SCORE", 0.08)
+    SENTIMENT_DIRECTIONAL_FLOOR = _env_float("SENTIMENT_DIRECTIONAL_FLOOR", 0.05)
+    SENTIMENT_MIN_ARTICLES = _env_int("SENTIMENT_MIN_ARTICLES", 3)
 
     # Additional guardrails for deterministic-first flow
     MIN_NEW_CLOSED_TRADES_FOR_REVIEW = _env_int("MIN_NEW_CLOSED_TRADES_FOR_REVIEW", 10)
@@ -111,6 +115,9 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4.1-mini")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    OPENAI_NEWS_SUMMARY_MODEL_ID = os.getenv("OPENAI_NEWS_SUMMARY_MODEL_ID", "gpt-5-nano")
+    ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+    CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")
 
     # Approximate costs (USD / 1M tokens), used for runtime budgeting
     SONNET_INPUT_USD_PER_1M = _env_float("SONNET_INPUT_USD_PER_1M", 3.00)
@@ -119,6 +126,8 @@ class Config:
     HAIKU_OUTPUT_USD_PER_1M = _env_float("HAIKU_OUTPUT_USD_PER_1M", 4.00)
     OPENAI_INPUT_USD_PER_1M = _env_float("OPENAI_INPUT_USD_PER_1M", 0.40)
     OPENAI_OUTPUT_USD_PER_1M = _env_float("OPENAI_OUTPUT_USD_PER_1M", 1.60)
+    OPENAI_NEWS_SUMMARY_INPUT_USD_PER_1M = _env_float("OPENAI_NEWS_SUMMARY_INPUT_USD_PER_1M", OPENAI_INPUT_USD_PER_1M)
+    OPENAI_NEWS_SUMMARY_OUTPUT_USD_PER_1M = _env_float("OPENAI_NEWS_SUMMARY_OUTPUT_USD_PER_1M", OPENAI_OUTPUT_USD_PER_1M)
 
     # ── API ──
     COINDCX_REST_BASE_URL = os.getenv("COINDCX_REST_BASE_URL", "https://api.coindcx.com")

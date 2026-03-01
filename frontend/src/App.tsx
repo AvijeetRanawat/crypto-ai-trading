@@ -23,6 +23,8 @@ function App() {
     regime,
     logs,
     llmSummary,
+    llmBreakdown,
+    newsSentiment,
   } = useDashboardData("BTCUSDT");
 
   const { panelWidth, onResizeMouseDown } = useResizablePanel();
@@ -59,6 +61,8 @@ function App() {
           intent={intent}
           latestSignal={latestSignal}
           llmSummary={llmSummary}
+          llmBreakdown={llmBreakdown}
+          newsSentiment={newsSentiment}
           lessons={lessons}
         />
       </main>
