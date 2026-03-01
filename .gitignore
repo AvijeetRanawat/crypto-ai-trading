@@ -10,3 +10,6 @@ __pycache__/
 .DS_Store
 *.pyc
 run.pid
+.coverage
+data/
+frontend/coverage/
