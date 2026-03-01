@@ -7,6 +7,7 @@ This application is a **simulation-first crypto trading system** designed to:
 1. Find tradeable setups across a focused whitelist of liquid crypto pairs.
 2. Combine deterministic technical logic with optional LLM tie-breaking.
 3. Allocate capital across **SPOT**, **FUTURES**, and **OPTIONS** policy tracks.
+4. Run those three modes **concurrently**, sharing the same balance but maintaining separate policy/intent state.
 4. Continuously adapt policy weighting with an online RL layer.
 5. Maximize long-run risk-adjusted profitability while preserving configurable safety rails.
 
@@ -32,7 +33,8 @@ The system is intentionally opinionated toward rapid iteration: clear logs, sess
 
 - Runs deterministic+policy logic loop in `engine.py`.
 - Uses a minimum warmup history (`WARMUP_MIN_TICKS`) before decisions.
-- Evaluates one-symbol-at-a-time opportunities when no open position.
+- Runs **three concurrent loops** (SPOT/FUTURES/OPTIONS) against a shared simulator.
+- Evaluates one-symbol-at-a-time opportunities **per mode** when that mode has no open position.
 - Manages open trades with:
   - dynamic ATR stop/take-profit
   - trailing stop activation
@@ -41,7 +43,7 @@ The system is intentionally opinionated toward rapid iteration: clear logs, sess
 
 ## 3) Three Product Policies (Parallel)
 
-The engine can evaluate in parallel:
+The engine runs three modes in parallel:
 
 - `SPOT`
 - `FUTURES`
@@ -55,7 +57,8 @@ Each policy returns:
 - strategy label
 - component-wise diagnostic scores
 
-The best allowed mode (highest composite score) gets selected for execution.
+Each mode makes its own trade decisions concurrently while sharing the same balance pool.
+Mode-specific decisions are tagged with `SPOT_`, `FUTURES_`, or `OPTIONS_` prefixes.
 
 ## 4) LLM Layer
 
@@ -92,7 +95,7 @@ For each eligible symbol:
 6. Evaluate SPOT/FUTURES/OPTIONS policies in parallel (pre-LLM).
 7. If borderline and permitted, call LLM tie-breaker.
 8. Re-evaluate policies (post-LLM) with final direction/confidence.
-9. Choose best allowed mode by composite score.
+9. Choose best allowed mode by composite score **within the active mode**.
 10. Size position (risk-capped by balance + config limits).
 11. Execute paper trade and persist full decision metadata.
 

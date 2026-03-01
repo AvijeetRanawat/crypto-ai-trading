@@ -117,7 +117,7 @@ python run.py
 
 `run.py` starts:
 - Dashboard API + frontend on port `8000`
-- Trading engine loop
+- Trading engine loops for **SPOT/FUTURES/OPTIONS** (running concurrently with shared balance)
 - Auto-restart watcher for backend file changes (`AUTO_RESTART_ON_BACKEND_CHANGES=true`)
 
 Open in browser:
@@ -142,6 +142,7 @@ curl http://localhost:8000/api/portfolio/summary
 curl http://localhost:8000/api/logs?lines=20
 curl http://localhost:8000/api/llm/summary
 curl http://localhost:8000/api/news/sentiment
+curl "http://localhost:8000/api/intent?mode=SPOT"
 ```
 
 ## 6. Stop the App

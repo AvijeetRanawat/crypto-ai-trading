@@ -7,7 +7,7 @@ Algorithmic + LLM-assisted crypto trading engine with:
 - Session-scoped dashboard and analytics
 
 The app runs two processes together:
-- Trading engine loop
+- Trading engine (runs three modes concurrently: SPOT/FUTURES/OPTIONS)
 - FastAPI dashboard backend with React frontend (served from `static/`)
 
 Default dashboard URL: `http://localhost:8000`
@@ -19,6 +19,7 @@ Default dashboard URL: `http://localhost:8000`
 - Computes deterministic strategy votes (momentum/swing + technical tools)
 - Optionally calls an LLM on borderline setups
 - Simulates trades in paper mode (default)
+- Runs **SPOT, FUTURES, OPTIONS** in parallel while sharing a common balance pool
 - Persists prices, trades, signals, lessons, and LLM usage to SQLite
 - Serves a live dashboard for session metrics and logs
 
@@ -73,7 +74,7 @@ Open:
 3. Clears `trading.log`
 4. Initializes DB schema/migrations
 5. Resets session data (trades/portfolio/signals/prices)
-6. Starts dashboard and trading engine concurrently
+6. Starts dashboard and trading engine concurrently (engine runs three mode loops)
 
 Important: each `python run.py` starts a fresh session and clears transient session data while preserving lessons/rules.
 
@@ -165,7 +166,7 @@ Core endpoints:
 - `GET /api/regime`
 - `GET /api/news/sentiment`
 - `GET /api/news/headlines?limit=8`
-- `GET /api/intent`
+- `GET /api/intent?mode=SPOT` (mode-specific intent)
 - `GET /api/logs?lines=60`
 
 Static frontend is mounted at `/` from the `static/` directory.
