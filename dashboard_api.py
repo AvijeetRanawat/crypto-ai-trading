@@ -11,6 +11,7 @@ from config import config
 from news_sentiment import build_sentiment_snapshot, summarize_sentiment_with_llm
 from database import save_llm_usage
 from logger import logger
+from rl_agent import PROFILES
 
 app = FastAPI(title="Crypto AI Trading Dashboard")
 
@@ -163,7 +164,7 @@ async def get_warmup(symbol: str = "BTCUSDT"):
         "min_ticks": MIN_TICKS,
         "pct": min(100, round(ticks / MIN_TICKS * 100)),
         "done": done,
-        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 60),
+        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 20),
     }
 
 
@@ -753,6 +754,68 @@ async def get_rl_cost():
             }
             for r in recent_rows
         ],
+    }
+
+
+@app.get("/api/rl/weights")
+async def get_rl_weights():
+    """Expose RL learned state and profile multipliers for UI inspection."""
+    weights_path = os.path.join(os.path.dirname(__file__), "data", "rl_weights.json")
+    if not os.path.exists(weights_path):
+        return {
+            "meta": {"epsilon": 0.0, "updated_at": ""},
+            "profiles": PROFILES,
+            "learned": {"SPOT": [], "FUTURES": [], "OPTIONS": []},
+        }
+
+    try:
+        with open(weights_path, "r", encoding="utf-8") as f:
+            raw = json.load(f) or {}
+    except Exception as e:
+        logger.error(f"Failed to load RL weights file: {e}")
+        return {
+            "meta": {"epsilon": 0.0, "updated_at": ""},
+            "profiles": PROFILES,
+            "learned": {"SPOT": [], "FUTURES": [], "OPTIONS": []},
+            "error": str(e),
+        }
+
+    q_all = raw.get("q", {}) or {}
+    n_all = raw.get("n", {}) or {}
+    learned = {}
+    for mode in ("SPOT", "FUTURES", "OPTIONS"):
+        q_mode = q_all.get(mode, {}) or {}
+        n_mode = n_all.get(mode, {}) or {}
+        state_rows = []
+        for state_key, q_row in q_mode.items():
+            n_row = n_mode.get(state_key, {}) or {}
+            profiles = []
+            total_n = 0
+            for profile_id, q_val in (q_row or {}).items():
+                n_val = int(n_row.get(profile_id, 0) or 0)
+                total_n += n_val
+                profiles.append(
+                    {
+                        "profile_id": profile_id,
+                        "q": round(float(q_val or 0.0), 8),
+                        "n": n_val,
+                    }
+                )
+            profiles.sort(key=lambda item: (item["q"], item["n"]), reverse=True)
+            state_rows.append(
+                {
+                    "state_key": state_key,
+                    "total_n": total_n,
+                    "profiles": profiles,
+                }
+            )
+        state_rows.sort(key=lambda row: row["total_n"], reverse=True)
+        learned[mode] = state_rows[:40]
+
+    return {
+        "meta": raw.get("meta", {}) or {"epsilon": 0.0, "updated_at": ""},
+        "profiles": PROFILES,
+        "learned": learned,
     }
 
 

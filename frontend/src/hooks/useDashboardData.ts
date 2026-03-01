@@ -4,6 +4,7 @@ import {
   DEFAULT_INTENT,
   DEFAULT_LLM_BREAKDOWN,
   DEFAULT_RL_COST_SUMMARY,
+  DEFAULT_RL_WEIGHTS,
   DEFAULT_LLM_SUMMARY,
   DEFAULT_NEWS_SENTIMENT,
   DEFAULT_REGIME,
@@ -19,6 +20,7 @@ import {
   type PortfolioSummary,
   type RegimeData,
   type RlCostSummary,
+  type RlWeightsSnapshot,
   type SignalEvent,
   type StrategyDiagnostics,
   type Trade,
@@ -44,6 +46,7 @@ interface DashboardDataState {
   newsSentiment: NewsSentiment;
   strategyDiagnostics: StrategyDiagnostics;
   rlCostSummary: RlCostSummary;
+  rlWeights: RlWeightsSnapshot;
 }
 
 const FAST_POLL_MS = 3000;
@@ -70,6 +73,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
   const [newsSentiment, setNewsSentiment] = useState<NewsSentiment>(DEFAULT_NEWS_SENTIMENT);
   const [strategyDiagnostics, setStrategyDiagnostics] = useState<StrategyDiagnostics>(DEFAULT_STRATEGY_DIAGNOSTICS);
   const [rlCostSummary, setRlCostSummary] = useState<RlCostSummary>(DEFAULT_RL_COST_SUMMARY);
+  const [rlWeights, setRlWeights] = useState<RlWeightsSnapshot>(DEFAULT_RL_WEIGHTS);
 
   const sessionStartRef = useRef<string | null>(localStorage.getItem(STORAGE_KEYS.sessionStart));
   const fastPollInFlightRef = useRef(false);
@@ -90,6 +94,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
     setNewsSentiment({ ...DEFAULT_NEWS_SENTIMENT });
     setStrategyDiagnostics({ ...DEFAULT_STRATEGY_DIAGNOSTICS, symbol, mode: tradingMode });
     setRlCostSummary({ ...DEFAULT_RL_COST_SUMMARY });
+    setRlWeights({ ...DEFAULT_RL_WEIGHTS });
   }, [symbol, tradingMode]);
 
   const syncSessionStart = useCallback(async () => {
@@ -153,7 +158,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
       slowPollInFlightRef.current = true;
       lastSlowPollAtRef.current = now;
       try {
-        const [tradeData, lessonData, logData, usage, breakdown, diagnostics, news, rlCost] = await Promise.all([
+        const [tradeData, lessonData, logData, usage, breakdown, diagnostics, news, rlCost, rlWeightsData] = await Promise.all([
           dashboardApi.tradesRecent(),
           dashboardApi.lessons(),
           dashboardApi.logs(120),
@@ -162,6 +167,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
           dashboardApi.strategyDiagnostics(symbol, tradingMode),
           dashboardApi.newsSentiment(symbol),
           dashboardApi.rlCost(),
+          dashboardApi.rlWeights(),
         ]);
 
         if (!active) return;
@@ -173,6 +179,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
         if (diagnostics) setStrategyDiagnostics(diagnostics);
         if (news) setNewsSentiment(news);
         if (rlCost) setRlCostSummary(rlCost);
+        if (rlWeightsData) setRlWeights(rlWeightsData);
       } finally {
         slowPollInFlightRef.current = false;
       }
@@ -210,5 +217,6 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
     newsSentiment,
     strategyDiagnostics,
     rlCostSummary,
+    rlWeights,
   };
 }

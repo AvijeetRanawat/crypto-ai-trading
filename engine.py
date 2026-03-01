@@ -381,7 +381,13 @@ class TradingEngine:
             except Exception as e:
                 logger.error(f"Failed to save llm_usage: {e}")
 
-    def _sentiment_gate(self, symbol: str, proposed_dir: str, snapshot: dict = None):
+    def _sentiment_gate(
+        self,
+        symbol: str,
+        proposed_dir: str,
+        snapshot: dict = None,
+        sentiment_gate_mult: float = 1.0,
+    ):
         """
         Sentiment-aware entry gate.
         Returns: (allowed: bool, verdict: str)
@@ -400,21 +406,24 @@ class TradingEngine:
             label = str(snapshot.get("sentiment_label", "NEUTRAL"))
             components = snapshot.get("components", {}) or {}
             article_count = int(components.get("articles_count", 0) or 0)
+            gate_mult = max(0.60, min(1.40, float(sentiment_gate_mult or 1.0)))
+            min_abs_score = float(config.SENTIMENT_MIN_ABS_SCORE) * gate_mult
+            directional_floor = float(config.SENTIMENT_DIRECTIONAL_FLOOR) * gate_mult
 
             # If feed coverage is thin, do not hard-block entries.
             if article_count < config.SENTIMENT_MIN_ARTICLES:
                 return True, f"Sentiment thin ({article_count} articles)"
 
-            if abs(score) < config.SENTIMENT_MIN_ABS_SCORE:
-                return False, f"Sentiment weak ({score:+.2f})"
+            if abs(score) < min_abs_score:
+                return False, f"Sentiment weak ({score:+.2f}; gate x{gate_mult:.2f})"
 
-            if proposed_dir == "LONG" and score < config.SENTIMENT_DIRECTIONAL_FLOOR:
-                return False, f"Sentiment opposes LONG ({label} {score:+.2f})"
+            if proposed_dir == "LONG" and score < directional_floor:
+                return False, f"Sentiment opposes LONG ({label} {score:+.2f}; gate x{gate_mult:.2f})"
 
-            if proposed_dir == "SHORT" and score > -config.SENTIMENT_DIRECTIONAL_FLOOR:
-                return False, f"Sentiment opposes SHORT ({label} {score:+.2f})"
+            if proposed_dir == "SHORT" and score > -directional_floor:
+                return False, f"Sentiment opposes SHORT ({label} {score:+.2f}; gate x{gate_mult:.2f})"
 
-            return True, f"Sentiment supports {proposed_dir} ({label} {score:+.2f})"
+            return True, f"Sentiment supports {proposed_dir} ({label} {score:+.2f}; gate x{gate_mult:.2f})"
         except Exception as e:
             logger.warning(f"Sentiment gate fallback: {e}")
             return True, "Sentiment unavailable (TA-only fallback)"
@@ -2161,7 +2170,10 @@ class TradingEngine:
                             )
 
                         sentiment_ok, sentiment_verdict = self._sentiment_gate(
-                            symbol, proposed_dir, snapshot=sentiment_snapshot
+                            symbol,
+                            proposed_dir,
+                            snapshot=sentiment_snapshot,
+                            sentiment_gate_mult=rl_vote_inf.get("sentiment_gate_mult", 1.0),
                         )
                         if not sentiment_ok:
                             if (

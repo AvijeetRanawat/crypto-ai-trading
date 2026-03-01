@@ -8,6 +8,7 @@ import type {
   NewsSentiment,
   PortfolioSummary,
   RlCostSummary,
+  RlWeightsSnapshot,
   RegimeData,
   SessionStartResponse,
   SignalEvent,
@@ -55,6 +56,7 @@ export const dashboardApi = {
   llmSummary: () => fetchJson<LlmSummary>(`${API_BASE}/llm/summary`),
   llmBreakdown: () => fetchJson<LlmBreakdown>(`${API_BASE}/llm/breakdown`),
   rlCost: () => fetchJson<RlCostSummary>(`${API_BASE}/rl/cost`),
+  rlWeights: () => fetchJson<RlWeightsSnapshot>(`${API_BASE}/rl/weights`),
   strategyDiagnostics: (symbol: string, mode: string) =>
     fetchJson<StrategyDiagnostics>(
       `${API_BASE}/strategy/diagnostics?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`,

@@ -38,6 +38,7 @@ function App() {
     newsSentiment,
     strategyDiagnostics,
     rlCostSummary,
+    rlWeights,
   } = useDashboardData(selectedSymbol, tradingMode);
 
   const { panelWidth, onResizeMouseDown } = useResizablePanel();
@@ -81,6 +82,8 @@ function App() {
           signals={signals}
           trades={trades}
           rlCostSummary={rlCostSummary}
+          rlWeights={rlWeights}
+          tradingMode={tradingMode}
         />
 
         <div id="v-resizer" className="resizer-v" onMouseDown={onResizeMouseDown} />

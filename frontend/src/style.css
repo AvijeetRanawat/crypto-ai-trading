@@ -428,6 +428,11 @@ body {
     min-height: 0;
 }
 
+.rl-header {
+    justify-content: space-between;
+    margin-bottom: 0.35rem;
+}
+
 .rl-cost-row {
     display: flex;
     justify-content: space-between;
@@ -1060,6 +1065,106 @@ body {
     color: var(--muted);
     font-size: 9px;
     margin-top: 2px;
+}
+
+.rl-profile-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+}
+
+.rl-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.2rem;
+}
+
+.rl-tab-btn {
+    border: 1px solid var(--border);
+    background: var(--tile-bg);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+}
+
+.rl-tab-btn:hover {
+    border-color: var(--accent);
+}
+
+.rl-tab-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.25);
+}
+
+.rl-profile-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--tile-bg);
+    padding: 0.45rem 0.55rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+}
+
+.rl-profile-title {
+    font-size: 10px;
+    color: var(--text);
+    font-weight: 700;
+}
+
+.rl-profile-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    color: var(--muted);
+}
+
+.rl-learned-list {
+    margin-top: 0.25rem;
+}
+
+.rl-learned-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--tile-bg);
+    padding: 0.4rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.rl-learned-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.rl-state-key {
+    font-size: 9px;
+    color: var(--text);
+    word-break: break-all;
+}
+
+.rl-learned-profiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.rl-learned-pill {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 9px;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.02);
 }
 
 /* ── LESSONS ── */

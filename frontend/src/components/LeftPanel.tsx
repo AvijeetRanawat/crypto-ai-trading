@@ -1,9 +1,18 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Chart, type ChartData, registerables } from "chart.js";
 import { ColorType, CrosshairMode, createChart, type UTCTimestamp } from "lightweight-charts";
-import type { MarketPoint, PortfolioSummary, RlCostSummary, SignalEvent, Trade, WarmupData } from "../types/dashboard";
+import type {
+  MarketPoint,
+  PortfolioSummary,
+  RlCostSummary,
+  RlWeightsSnapshot,
+  SignalEvent,
+  Trade,
+  WarmupData,
+} from "../types/dashboard";
 import { formatPair, formatPct, formatUsd } from "../utils/format";
 import { getThemeTokens } from "../utils/theme";
+import { RlAgentModal } from "./RlAgentModal";
 
 Chart.register(...registerables);
 
@@ -18,6 +27,8 @@ interface LeftPanelProps {
   signals: SignalEvent[];
   trades: Trade[];
   rlCostSummary: RlCostSummary;
+  rlWeights: RlWeightsSnapshot;
+  tradingMode: string;
 }
 
 interface PerfSummary {
@@ -61,6 +72,8 @@ export function LeftPanel({
   signals,
   trades,
   rlCostSummary,
+  rlWeights,
+  tradingMode,
 }: LeftPanelProps) {
   type ChartApi = ReturnType<typeof createChart>;
   type LineSeriesApi = ReturnType<ChartApi["addLineSeries"]>;
@@ -76,6 +89,7 @@ export function LeftPanel({
   const priceContainerRef = useRef<HTMLDivElement | null>(null);
   const signalContainerRef = useRef<HTMLDivElement | null>(null);
   const perfCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [rlExpanded, setRlExpanded] = useState(false);
 
   const latestSignal = signals.length ? signals[signals.length - 1] : null;
 
@@ -530,7 +544,12 @@ export function LeftPanel({
         </div>
 
         <div className="rl-cost-card glass">
-          <div className="card-label">RL AGENT COST</div>
+          <div className="section-header rl-header">
+            <span>RL AGENT</span>
+            <button className="expand-btn" onClick={() => setRlExpanded(true)} type="button">
+              Expand
+            </button>
+          </div>
           <div className="rl-cost-grid">
             <div className="rl-cost-row">
               <span>Session Events</span>
@@ -557,6 +576,7 @@ export function LeftPanel({
           </div>
         </div>
       </div>
+      <RlAgentModal open={rlExpanded} mode={tradingMode} weights={rlWeights} onClose={() => setRlExpanded(false)} />
     </div>
   );
 }

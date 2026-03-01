@@ -44,12 +44,14 @@ PROFILES = {
             },
             "size_mult": 1.25,
             "confidence_bias": 0.04,
+            "sentiment_gate_mult": 0.85,
         },
         "balanced": {
             "weight_mult": {},
             "voter_weight_mult": {},
             "size_mult": 1.00,
             "confidence_bias": 0.00,
+            "sentiment_gate_mult": 1.00,
         },
         "breakout_hunter": {
             "weight_mult": {
@@ -73,6 +75,7 @@ PROFILES = {
             },
             "size_mult": 1.35,
             "confidence_bias": 0.05,
+            "sentiment_gate_mult": 0.90,
         },
     },
     "FUTURES": {
@@ -99,6 +102,7 @@ PROFILES = {
             "size_mult": 1.30,
             "leverage_mult": 1.20,
             "confidence_bias": 0.05,
+            "sentiment_gate_mult": 0.92,
         },
         "balanced": {
             "weight_mult": {},
@@ -106,6 +110,7 @@ PROFILES = {
             "size_mult": 1.00,
             "leverage_mult": 1.00,
             "confidence_bias": 0.00,
+            "sentiment_gate_mult": 1.00,
         },
         "trend_rider": {
             "weight_mult": {
@@ -130,6 +135,7 @@ PROFILES = {
             "size_mult": 1.36,
             "leverage_mult": 1.28,
             "confidence_bias": 0.06,
+            "sentiment_gate_mult": 0.95,
         },
     },
     "OPTIONS": {
@@ -156,12 +162,14 @@ PROFILES = {
             },
             "size_mult": 1.22,
             "confidence_bias": 0.04,
+            "sentiment_gate_mult": 0.90,
         },
         "balanced": {
             "weight_mult": {},
             "voter_weight_mult": {},
             "size_mult": 1.00,
             "confidence_bias": 0.00,
+            "sentiment_gate_mult": 1.00,
         },
         "volatility_seller": {
             "weight_mult": {
@@ -186,6 +194,7 @@ PROFILES = {
             },
             "size_mult": 1.18,
             "confidence_bias": 0.03,
+            "sentiment_gate_mult": 0.96,
         },
     },
 }
@@ -317,7 +326,10 @@ class RLWeightAgent:
                     profile_id = max(profile_ids, key=lambda p: float(q_mode.get(p, 0.0)))
                     decision_type = "exploit"
 
-            profile = mode_profiles.get(profile_id, {"weight_mult": {}, "size_mult": 1.0, "confidence_bias": 0.0})
+            profile = mode_profiles.get(
+                profile_id,
+                {"weight_mult": {}, "size_mult": 1.0, "confidence_bias": 0.0, "sentiment_gate_mult": 1.0},
+            )
             return {
                 "mode": mode,
                 "state_key": state_key,
@@ -327,6 +339,7 @@ class RLWeightAgent:
                 "size_mult": float(profile.get("size_mult", 1.0) or 1.0),
                 "leverage_mult": float(profile.get("leverage_mult", 1.0) or 1.0),
                 "confidence_bias": float(profile.get("confidence_bias", 0.0) or 0.0),
+                "sentiment_gate_mult": float(profile.get("sentiment_gate_mult", 1.0) or 1.0),
                 "decision_type": decision_type,
                 "q_value": float(q_mode.get(profile_id, 0.0)),
                 "epsilon": float(self.epsilon),
@@ -458,11 +471,23 @@ class MLXWeightAgent:
 
     def infer(self, mode: str, features: dict) -> dict:
         if not self.enabled:
-            return {"profile_id": "balanced", "state_key": "", "decision_type": "heuristic", "weight_mult": {}}
+            return {
+                "profile_id": "balanced",
+                "state_key": "",
+                "decision_type": "heuristic",
+                "weight_mult": {},
+                "sentiment_gate_mult": 1.0,
+            }
         with self._lock:
             self._ensure_model(mode)
             if mode not in self.models:
-                return {"profile_id": "balanced", "state_key": "", "decision_type": "fallback", "weight_mult": {}}
+                return {
+                    "profile_id": "balanced",
+                    "state_key": "",
+                    "decision_type": "fallback",
+                    "weight_mult": {},
+                    "sentiment_gate_mult": 1.0,
+                }
         feature_vec = self._featurize(features)
         x = mx.array([feature_vec], dtype=mx.float32)
         q = self.models[mode](x)[0]
@@ -487,6 +512,7 @@ class MLXWeightAgent:
             "size_mult": profile.get("size_mult", 1.0),
             "leverage_mult": profile.get("leverage_mult", 1.0),
             "confidence_bias": profile.get("confidence_bias", 0.0),
+            "sentiment_gate_mult": profile.get("sentiment_gate_mult", 1.0),
             "q_value": max(q_list) if q_list else 0.0,
         }
 

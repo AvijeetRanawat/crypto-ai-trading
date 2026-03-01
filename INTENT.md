@@ -218,6 +218,7 @@ The RL layer makes the system less static by learning which weight profile works
   - size multiplier
   - leverage multiplier (futures)
   - voter weight multipliers (applied to the 8 deterministic vote parameters)
+  - sentiment gate multiplier (`sentiment_gate_mult`) that scales sentiment gate strictness
 - Reward:
   - realized trade PnL normalized by notional (profit positive, loss negative)
   - minus open-trade opportunity cost penalty
@@ -244,6 +245,18 @@ And can conditionally override sentiment rejection when:
 - weighted directional support still clears threshold
 
 This keeps the system aggressive enough to keep learning while preserving edge-quality constraints.
+
+## RL-Driven Sentiment Gate
+
+Sentiment gating is no longer static. The active RL profile now provides a
+`sentiment_gate_mult` value that scales:
+
+- `SENTIMENT_MIN_ABS_SCORE`
+- `SENTIMENT_DIRECTIONAL_FLOOR`
+
+Lower multiplier values make the gate less strict (more entries), while higher
+values make it stricter. This parameter is learned through the same reward loop
+as other RL profile parameters.
 
 ## Exploration vs Exploitation
 
@@ -288,6 +301,7 @@ The app logs high-volume event traces by design:
 - entry/exit reasons with confidence and score traces
 - signal events capture raw votes plus weighted buy/sell/total
 - RL updates (`RL_UPDATE`, reward, Q-value drift, epsilon)
+- sentiment gate verdicts include active gate multiplier (`gate x...`)
 
 Dashboard sections expose:
 
@@ -300,6 +314,12 @@ Dashboard sections expose:
 - LLM token/cost usage (aggregate + model breakdown)
 - lessons learned
 - system logs
+- RL Agent card with modal breakdown of learned Q/N and profile weights
+
+RL observability APIs:
+
+- `/api/rl/cost` for reward/penalty aggregates and recent RL events
+- `/api/rl/weights` for mode-specific profile multipliers and learned state tables
 
 ---
 

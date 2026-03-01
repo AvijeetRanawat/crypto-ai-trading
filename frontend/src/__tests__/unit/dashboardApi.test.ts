@@ -82,10 +82,11 @@ describe("dashboardApi", () => {
     await dashboardApi.llmSummary();
     await dashboardApi.llmBreakdown();
     await dashboardApi.rlCost();
+    await dashboardApi.rlWeights();
     await dashboardApi.strategyDiagnostics("BTCUSDT", "SPOT");
     await dashboardApi.newsSentiment("BTCUSDT");
 
-    expect(fetchMock).toHaveBeenCalledTimes(15);
+    expect(fetchMock).toHaveBeenCalledTimes(16);
   });
 
   it("returns null when fetch throws", async () => {

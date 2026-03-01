@@ -225,6 +225,37 @@ export interface RlCostSummary {
   recent: RlCostEvent[];
 }
 
+export interface RlProfileConfig {
+  weight_mult?: Record<string, number>;
+  voter_weight_mult?: Record<string, number>;
+  size_mult?: number;
+  leverage_mult?: number;
+  confidence_bias?: number;
+  sentiment_gate_mult?: number;
+}
+
+export interface RlLearnedProfile {
+  profile_id: string;
+  q: number;
+  n: number;
+}
+
+export interface RlLearnedState {
+  state_key: string;
+  total_n: number;
+  profiles: RlLearnedProfile[];
+}
+
+export interface RlWeightsSnapshot {
+  meta: {
+    epsilon: number;
+    updated_at: string;
+  };
+  profiles: Record<string, Record<string, RlProfileConfig>>;
+  learned: Record<string, RlLearnedState[]>;
+  error?: string;
+}
+
 export const DEFAULT_WARMUP: WarmupData = {
   symbol: "BTCUSDT",
   done: false,
@@ -357,4 +388,17 @@ export const DEFAULT_RL_COST_SUMMARY: RlCostSummary = {
     total_reward: 0,
   },
   recent: [],
+};
+
+export const DEFAULT_RL_WEIGHTS: RlWeightsSnapshot = {
+  meta: {
+    epsilon: 0,
+    updated_at: "",
+  },
+  profiles: {},
+  learned: {
+    SPOT: [],
+    FUTURES: [],
+    OPTIONS: [],
+  },
 };
