@@ -1843,7 +1843,7 @@ class TradingEngine:
 
                     # ── Fix 3: MINIMUM HOLD TIME (300s) ────────────────────
                     # Allow 1m candles enough time to breathe. Force 5m minimum.
-                    min_hold_met = hold_secs >= 300
+                    min_hold_met = hold_secs >= 120
 
                     # ── TAKE PROFIT ──
                     if min_hold_met and pnl_pct >= tp_pct:
@@ -3002,6 +3002,11 @@ class TradingEngine:
                             product_score = float(policy_eval.get("composite_score", 0.0) or 0.0)
                             product_strategy = str(policy_eval.get("recommended_strategy", "N/A"))
                             pos_usdt = int(pos_usdt * float(policy_eval.get("size_multiplier", 1.0) or 1.0))
+
+                        # Exploration trades use smaller size to gather more data with less risk
+                        if force_entry:
+                            pos_usdt = int(pos_usdt * 0.6)
+                            logger.info(f"🔬 Exploration size: ${pos_usdt:,} (60%% of normal)")
 
                         if self.consecutive_losses.get(active_mode, 0) >= 2:
                             pos_usdt = int(pos_usdt * 0.7)
