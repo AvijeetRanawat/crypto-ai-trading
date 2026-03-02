@@ -1567,9 +1567,16 @@ class TradingEngine:
                 notional = max(1.0, notional)
                 pnl_usd = float(trade_result.get("pnl", 0.0) or 0.0)
                 pnl_reward = pnl_usd / notional
+                
+                # Apply reward multipliers: heavily favor wins, keep losses 1:1
+                if pnl_reward > 0:
+                    pnl_reward *= float(rl_cfg("RL_PROFIT_REWARD_MULTIPLIER"))  # 3x boost for profits
+                elif pnl_reward < 0:
+                    pnl_reward *= float(rl_cfg("RL_LOSS_PENALTY_MULTIPLIER"))  # 1x for losses
+                
                 hold_secs = float(trade_result.get("hold_secs", 0) or 0)
                 raw_opp_cost_penalty = float(rl_cfg("RL_OPEN_TRADE_COST_PENALTY")) * max(1.5, hold_secs / 180.0)
-                opp_cap = self._rl_loss_penalty_cap(pnl_reward)
+                opp_cap = self._rl_loss_penalty_cap(pnl_reward / max(1.0, float(rl_cfg("RL_PROFIT_REWARD_MULTIPLIER")) if pnl_reward > 0 else 1.0))
                 opp_cost_penalty = min(raw_opp_cost_penalty, opp_cap)
                 reward = pnl_reward - opp_cost_penalty
                 self.rl_agent.update(rl_mode, rl_state_key, rl_profile_id, reward)
