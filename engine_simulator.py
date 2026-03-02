@@ -77,6 +77,7 @@ class PaperTradingSimulator:
             deterministic_conf=deterministic_conf,
             llm_conf=llm_conf,
             llm_cost_usd=llm_cost_usd,
+            mode=mode,
         )
 
         self.positions[pos_key] = {

@@ -1340,6 +1340,14 @@ body {
     animation: flashHighlight 0.7s ease-out;
 }
 
+/* Open positions container - display multiple positions side by side */
+.open-positions-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
 /* Open position badge */
 .open-pos-badge {
     font-family: var(--mono);
@@ -1650,3 +1658,367 @@ body {
 .equity-card {
     position: relative;
 }
+
+/* Crypto Balances Component */
+.crypto-balances {
+    margin: 0;
+    padding: 12px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.crypto-balances-empty {
+    padding: 12px;
+    text-align: center;
+}
+
+/* Compact Holdings Display in Right Panel */
+.holdings-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.holding-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--tile-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    transition: border-color 0.2s;
+}
+
+.holding-item:hover {
+    border-color: var(--accent);
+}
+
+.holding-symbol {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.holding-values {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.holding-value {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.holding-pnl {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.holding-pnl.positive {
+    color: var(--green);
+}
+
+.holding-pnl.negative {
+    color: var(--red);
+}
+
+.holdings-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    font-weight: 700;
+}
+
+.total-value {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+}
+
+.section-header.clickable {
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.section-header.clickable:hover {
+    opacity: 0.8;
+}
+
+.expand-hint {
+    font-size: 11px;
+    opacity: 0.5;
+}
+
+/* Crypto Balances Modal */
+.balances-summary-header {
+    display: flex;
+    gap: 16px;
+    padding: 16px;
+    background: var(--tile-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 16px;
+}
+
+.summary-stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.summary-stat .summary-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.summary-stat .summary-value {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.summary-stat .summary-value.positive {
+    color: var(--green);
+}
+
+.summary-stat .summary-value.negative {
+    color: var(--red);
+}
+
+.summary-pct {
+    font-size: 13px;
+    opacity: 0.8;
+}
+
+.balances-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+}
+
+.balance-card-detailed {
+    background: var(--tile-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    transition: border-color 0.2s;
+}
+
+.balance-card-detailed:hover {
+    border-color: var(--accent);
+}
+
+.balance-card-detailed .balance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+.balance-card-detailed .balance-symbol {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.balance-card-detailed .balance-pnl {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.balance-positions-detail {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.positions-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+.position-item {
+    display: grid;
+    grid-template-columns: 50px 1fr 1fr 80px;
+    gap: 8px;
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+    font-size: 10px;
+}
+
+.position-side {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 9px;
+}
+
+.position-qty,
+.position-price {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+}
+
+.position-pnl {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-align: right;
+}
+
+.position-pnl.positive {
+    color: var(--green);
+}
+
+.position-pnl.negative {
+    color: var(--red);
+}
+
+.balances-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.balances-header h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.balances-summary {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+}
+
+.summary-item {
+    display: flex;
+    gap: 6px;
+}
+
+.summary-label {
+    color: var(--muted);
+}
+
+.summary-value {
+    font-family: var(--mono);
+    font-weight: 600;
+}
+
+.summary-value.positive {
+    color: var(--green);
+}
+
+.summary-value.negative {
+    color: var(--red);
+}
+
+.balances-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.balance-card {
+    background: var(--tile-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    transition: border-color 0.2s;
+}
+
+.balance-card:hover {
+    border-color: var(--accent);
+}
+
+.balance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.balance-symbol {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.balance-pnl {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.balance-pnl.positive {
+    color: var(--green);
+}
+
+.balance-pnl.negative {
+    color: var(--red);
+}
+
+.balance-details {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.balance-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+}
+
+.balance-label {
+    color: var(--muted);
+}
+
+.balance-value {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.balance-positions {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+}
+
+.positions-label {
+    font-size: 10px;
+    color: var(--muted);
+    font-style: italic;
+}
+

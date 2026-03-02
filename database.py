@@ -302,6 +302,7 @@ def save_trade(
     deterministic_conf=None,
     llm_conf=None,
     llm_cost_usd=None,
+    mode="SPOT",
 ):
     conn = _conn()
     cursor = conn.cursor()
@@ -309,9 +310,9 @@ def save_trade(
         """
         INSERT INTO trades (
             symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status,
-            session_id, process_id, decision_source, deterministic_conf, llm_conf, llm_cost_usd
+            session_id, process_id, decision_source, deterministic_conf, llm_conf, llm_cost_usd, mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             symbol,
@@ -329,6 +330,7 @@ def save_trade(
             deterministic_conf,
             llm_conf,
             llm_cost_usd,
+            mode,
         ),
     )
     trade_id = cursor.lastrowid

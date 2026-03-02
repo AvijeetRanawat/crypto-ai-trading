@@ -37,7 +37,7 @@ describe("TopBar integration", () => {
           llm_cost_per_traded_signal: 0.04,
           llm_cost_per_dollar_pnl: 0.1,
           llm_trade_conversion_rate: 50,
-          open_position: null,
+          open_positions: [],
         }}
         balance={1260}
         uptime="00:10:00"

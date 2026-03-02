@@ -27,6 +27,7 @@ function App() {
     warmup,
     marketHistory,
     summary,
+    balances,
     signals,
     trades,
     lessons,
@@ -100,6 +101,7 @@ function App() {
           newsSentiment={newsSentiment}
           strategyDiagnostics={strategyDiagnostics}
           lessons={lessons}
+          balances={balances}
         />
       </main>
 

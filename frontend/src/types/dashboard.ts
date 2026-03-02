@@ -18,10 +18,13 @@ export interface MarketPoint {
 }
 
 export interface OpenPosition {
+  id: number;
   symbol: string;
   side: string;
   entry_price: number;
+  quantity: number;
   entry_time: string;
+  mode: string;
 }
 
 export interface PortfolioSummary {
@@ -39,7 +42,7 @@ export interface PortfolioSummary {
   llm_cost_per_traded_signal: number | null;
   llm_cost_per_dollar_pnl: number | null;
   llm_trade_conversion_rate: number;
-  open_position: OpenPosition | null;
+  open_positions: OpenPosition[];
 }
 
 export interface SignalEvent {
@@ -77,6 +80,34 @@ export interface Lesson {
   condition: string;
   lesson: string;
   severity: string;
+}
+
+export interface CryptoBalance {
+  symbol: string;  // Base asset (BTC, ETH, SOL)
+  total_quantity: number;  // Total owned (LONG positions only)
+  avg_entry_price: number;  // USD
+  current_price: number;  // USD
+  cost_basis: number;  // USD
+  current_value: number;  // USD
+  unrealized_pnl: number;  // USD
+  unrealized_pnl_pct: number;
+  positions: Array<{
+    id: number;
+    side: 'LONG';  // Only LONG positions shown
+    trading_pair: string;  // e.g. BTCUSDT, ETHUSDT
+    quantity: number;  // Positive for owned assets
+    entry_price: number;  // USD
+    entry_time: string;
+    current_price: number;  // USD
+    unrealized_pnl: number;  // USD
+  }>;
+}
+
+export interface PortfolioBalances {
+  balances: CryptoBalance[];
+  total_unrealized_pnl: number;
+  total_cost_basis: number;
+  total_current_value: number;
 }
 
 export interface IntentData {

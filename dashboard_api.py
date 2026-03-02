@@ -266,16 +266,16 @@ async def get_portfolio_summary():
     """, (SESSION_START, SESSION_ID))
     llm_decision_calls_session = cur.fetchone()[0]
 
-    # Open position
+    # Open positions (all)
     cur.execute(
         """
-        SELECT symbol, side, price, entry_time FROM trades
+        SELECT id, symbol, side, price, quantity, entry_time, mode FROM trades
         WHERE status='OPEN' AND (session_id = ? OR session_id IS NULL)
-        ORDER BY id DESC LIMIT 1
+        ORDER BY id DESC
         """,
         (SESSION_ID,),
     )
-    open_pos = cur.fetchone()
+    open_positions = cur.fetchall()
     conn.close()
 
     cost_per_traded_signal = (llm_cost_session / traded_signals) if traded_signals else None
@@ -301,10 +301,128 @@ async def get_portfolio_summary():
         "llm_cost_per_traded_signal": round(cost_per_traded_signal, 4) if cost_per_traded_signal is not None else None,
         "llm_cost_per_dollar_pnl": round(cost_per_dollar_pnl, 4) if cost_per_dollar_pnl is not None else None,
         "llm_trade_conversion_rate": round(llm_trade_conversion_rate, 2),
-        "open_position": {
-            "symbol": open_pos[0], "side": open_pos[1],
-            "entry_price": open_pos[2], "entry_time": open_pos[3]
-        } if open_pos else None,
+        "open_positions": [
+            {
+                "id": pos[0],
+                "symbol": pos[1],
+                "side": pos[2],
+                "entry_price": pos[3],
+                "quantity": pos[4],
+                "entry_time": pos[5],
+                "mode": pos[6] if len(pos) > 6 else "SPOT"
+            } for pos in open_positions
+        ],
+    }
+
+
+@app.get("/api/portfolio/balances")
+async def get_portfolio_balances():
+    """Get crypto asset balances with current prices and unrealized P&L."""
+    conn = _db()
+    cur = conn.cursor()
+    
+    # Get open positions (these represent owned crypto assets in SPOT mode)
+    cur.execute("""
+        SELECT id, symbol, side, price as entry_price, quantity, entry_time
+        FROM trades
+        WHERE status='OPEN' AND (session_id = ? OR session_id IS NULL)
+        ORDER BY symbol, id
+    """, (SESSION_ID,))
+    positions = cur.fetchall()
+    
+    # Get latest prices for all trading pairs
+    latest_prices = {}
+    for pos in positions:
+        symbol = pos[1]
+        cur.execute("""
+            SELECT price FROM prices
+            WHERE symbol = ?
+            ORDER BY id DESC LIMIT 1
+        """, (symbol,))
+        price_row = cur.fetchone()
+        if price_row:
+            latest_prices[symbol] = price_row[0]
+    
+    # Helper to parse trading pairs and get base/quote currencies
+    def parse_symbol(symbol: str):
+        # Common quote currencies  
+        for quote in ['USDT', 'BUSD', 'USD']:
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                return base, quote
+        # For non-USD pairs, return None to filter them out
+        return None, None
+    
+    conn.close()
+    
+    # Group positions by actual asset (base currency) with USD values
+    balances = {}
+    for pos in positions:
+        pos_id, symbol, side, entry_price, quantity, entry_time = pos
+        
+        base, quote = parse_symbol(symbol)
+        # Skip non-USD pairs and SHORT positions (only show owned assets)
+        if base is None or quote is None or side != "LONG":
+            continue
+            
+        current_price = latest_prices.get(symbol, entry_price)
+        
+        # For LONG positions, we own the base currency
+        asset_quantity = quantity
+        
+        # For USD pairs, price is already in USD
+        entry_price_usd = entry_price
+        current_price_usd = current_price
+        
+        # Calculate USD cost and value for LONG positions
+        cost_usd = asset_quantity * entry_price_usd
+        current_value_usd = asset_quantity * current_price_usd
+        pnl_usd = current_value_usd - cost_usd
+        
+        # Initialize asset if not seen before
+        if base not in balances:
+            balances[base] = {
+                "symbol": base,
+                "total_quantity": 0.0,
+                "avg_entry_price": 0.0,
+                "current_price": 0.0,
+                "cost_basis": 0.0,
+                "current_value": 0.0,
+                "unrealized_pnl": 0.0,
+                "unrealized_pnl_pct": 0.0,
+                "positions": []
+            }
+        
+        balances[base]["total_quantity"] += asset_quantity
+        balances[base]["cost_basis"] += cost_usd
+        balances[base]["current_value"] += current_value_usd
+        balances[base]["unrealized_pnl"] += pnl_usd
+        
+        balances[base]["positions"].append({
+            "id": pos_id,
+            "side": side,
+            "trading_pair": symbol,
+            "quantity": asset_quantity,
+            "entry_price": entry_price_usd,
+            "entry_time": entry_time,
+            "current_price": current_price_usd,
+            "unrealized_pnl": pnl_usd
+        })
+    
+    # Calculate weighted average entry price and current price for each asset
+    for asset_data in balances.values():
+        total_qty = abs(asset_data["total_quantity"])
+        if total_qty > 0:
+            asset_data["avg_entry_price"] = asset_data["cost_basis"] / total_qty
+            asset_data["current_price"] = asset_data["current_value"] / total_qty
+        if asset_data["cost_basis"] > 0:
+            asset_data["unrealized_pnl_pct"] = (asset_data["unrealized_pnl"] / asset_data["cost_basis"]) * 100
+    
+    return {
+        "balances": list(balances.values()),
+        "total_unrealized_pnl": sum(b["unrealized_pnl"] for b in balances.values()),
+        "total_cost_basis": sum(b["cost_basis"] for b in balances.values()),
+        "total_current_value": sum(b["current_value"] for b in balances.values())
     }
 
 

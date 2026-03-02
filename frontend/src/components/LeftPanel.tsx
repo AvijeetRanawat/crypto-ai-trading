@@ -443,24 +443,30 @@ export function LeftPanel({
         <span className={`live-change ${priceChange >= 0 ? "positive" : "negative"}`}>
           {formatPct(priceChange)}
         </span>
-        <span
-          className={`open-pos-badge ${
-            summary.open_position
-              ? String(summary.open_position.side || "").toUpperCase() === "LONG"
-                ? "positive"
-                : "negative"
-              : "neutral"
-          }`}
-        >
-          {summary.open_position
-            ? `${summary.open_position.side} ${summary.open_position.symbol} @ $${Number(
-                summary.open_position.entry_price || 0,
-              ).toLocaleString("en-US", {
-                minimumFractionDigits: priceDigits,
-                maximumFractionDigits: priceDigits,
-              })}`
-            : "No open position"}
-        </span>
+        <div className="open-positions-container">
+          {summary.open_positions && summary.open_positions.length > 0 ? (
+            summary.open_positions.map((pos) => {
+              const posPrice = Number(pos.entry_price || 0);
+              const posPriceDigits = posPrice < 1 ? 6 : 2;
+              const mode = pos.mode || 'SPOT';
+              return (
+                <span
+                  key={pos.id}
+                  className={`open-pos-badge ${
+                    String(pos.side || "").toUpperCase() === "LONG" ? "positive" : "negative"
+                  }`}
+                >
+                  {mode} {pos.side} {pos.symbol} @ ${posPrice.toLocaleString("en-US", {
+                    minimumFractionDigits: posPriceDigits,
+                    maximumFractionDigits: posPriceDigits,
+                  })}
+                </span>
+              );
+            })
+          ) : (
+            <span className="open-pos-badge neutral">No open positions</span>
+          )}
+        </div>
         <div className="legend">
           <span className="legend-item">
             <span className="legend-dot traded" />Traded

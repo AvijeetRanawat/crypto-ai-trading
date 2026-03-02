@@ -18,6 +18,7 @@ import {
   type LlmSummary,
   type MarketPoint,
   type NewsSentiment,
+  type PortfolioBalances,
   type PortfolioSummary,
   type RegimeData,
   type RlCostSummary,
@@ -37,6 +38,7 @@ interface DashboardDataState {
   warmup: WarmupData;
   marketHistory: MarketPoint[];
   summary: PortfolioSummary;
+  balances: PortfolioBalances | null;
   signals: SignalEvent[];
   trades: Trade[];
   lessons: Lesson[];
@@ -65,6 +67,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
   const [warmup, setWarmup] = useState<WarmupData>(DEFAULT_WARMUP);
   const [marketHistory, setMarketHistory] = useState<MarketPoint[]>([]);
   const [summary, setSummary] = useState<PortfolioSummary>(DEFAULT_SUMMARY);
+  const [balances, setBalances] = useState<PortfolioBalances | null>(null);
   const [signals, setSignals] = useState<SignalEvent[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -135,10 +138,11 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
           return;
         }
 
-        const [warm, market, portfolio, currentIntent, signalData, regimeData] = await Promise.all([
+        const [warm, market, portfolio, portfolioBalances, currentIntent, signalData, regimeData] = await Promise.all([
           dashboardApi.warmup(symbol),
           dashboardApi.marketHistory(symbol),
           dashboardApi.portfolioSummary(),
+          dashboardApi.portfolioBalances(),
           dashboardApi.intent(tradingMode),
           dashboardApi.signals(symbol, 60),
           dashboardApi.regime(symbol),
@@ -148,6 +152,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
         if (warm) setWarmup(warm);
         if (market) setMarketHistory(market);
         if (portfolio) setSummary(portfolio);
+        if (portfolioBalances) setBalances(portfolioBalances);
         if (currentIntent) setIntent(currentIntent);
         if (signalData) setSignals(signalData);
         if (regimeData) setRegime(regimeData);
@@ -213,6 +218,7 @@ export function useDashboardData(symbol = "BTCUSDT", tradingMode: TradingMode = 
     warmup,
     marketHistory,
     summary,
+    balances,
     signals,
     trades,
     lessons,

@@ -1,17 +1,19 @@
 import { useState } from "react";
 import { LlmBreakdownModal } from "./LlmBreakdownModal";
 import { MarketSentimentModal } from "./MarketSentimentModal";
+import { CryptoBalancesModal } from "./CryptoBalancesModal";
 import type {
   IntentData,
   Lesson,
   LlmBreakdown,
   LlmSummary,
   NewsSentiment,
+  PortfolioBalances,
   RegimeData,
   SignalEvent,
   StrategyDiagnostics,
 } from "../types/dashboard";
-import { formatNum } from "../utils/format";
+import { formatNum, formatUsd } from "../utils/format";
 
 interface RightPanelProps {
   panelWidth: number;
@@ -23,6 +25,7 @@ interface RightPanelProps {
   newsSentiment: NewsSentiment;
   strategyDiagnostics: StrategyDiagnostics;
   lessons: Lesson[];
+  balances: PortfolioBalances | null;
 }
 
 function regimeClassName(regime: string): string {
@@ -61,9 +64,11 @@ export function RightPanel({
   newsSentiment,
   strategyDiagnostics,
   lessons,
+  balances,
 }: RightPanelProps) {
   const [llmExpanded, setLlmExpanded] = useState(false);
   const [sentimentExpanded, setSentimentExpanded] = useState(false);
+  const [balancesExpanded, setBalancesExpanded] = useState(false);
   const buyVotes = latestSignal?.buy_votes ?? 0;
   const sellVotes = latestSignal?.sell_votes ?? 0;
   const weightedBuy = latestSignal?.weighted_buy ?? buyVotes;
@@ -84,6 +89,38 @@ export function RightPanel({
 
   return (
     <aside className="ai-panel" style={{ width: `${panelWidth}px` }}>
+      {/* Crypto Holdings Section */}
+      {balances && balances.balances.length > 0 && (
+        <div className="panel-section glass">
+          <div className="section-header clickable" onClick={() => setBalancesExpanded(true)}>
+            <span>🪙 CRYPTO HOLDINGS</span>
+            <span className="expand-hint">↗</span>
+          </div>
+          <div className="holdings-compact">
+            {balances.balances.map((balance) => {
+              const pnlClass = balance.unrealized_pnl >= 0 ? "positive" : "negative";
+              return (
+                <div key={balance.symbol} className="holding-item">
+                  <span className="holding-symbol">
+                    {balance.symbol.replace("USDT", "").replace("BTC", "/BTC")}
+                  </span>
+                  <div className="holding-values">
+                    <span className="holding-value">{formatUsd(balance.current_value)}</span>
+                    <span className={`holding-pnl ${pnlClass}`}>
+                      {balance.unrealized_pnl >= 0 ? "+" : ""}{balance.unrealized_pnl_pct.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            <div className="holdings-total">
+              <span>Total</span>
+              <span className="total-value">{formatUsd(balances.total_current_value)}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="panel-section glass">
         <div className="section-header">
           <span>MARKET REGIME</span>
@@ -338,6 +375,12 @@ export function RightPanel({
           })}
         </div>
       </div>
+
+      <CryptoBalancesModal
+        open={balancesExpanded}
+        balances={balances}
+        onClose={() => setBalancesExpanded(false)}
+      />
     </aside>
   );
 }

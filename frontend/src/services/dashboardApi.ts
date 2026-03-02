@@ -6,6 +6,7 @@ import type {
   LlmSummary,
   MarketPoint,
   NewsSentiment,
+  PortfolioBalances,
   PortfolioSummary,
   RlCostSummary,
   RlTuningSnapshot,
@@ -68,6 +69,7 @@ export const dashboardApi = {
   marketHistory: (symbol: string) =>
     fetchJson<MarketPoint[]>(`${API_BASE}/market/history?symbol=${encodeURIComponent(symbol)}`),
   portfolioSummary: () => fetchJson<PortfolioSummary>(`${API_BASE}/portfolio/summary`),
+  portfolioBalances: () => fetchJson<PortfolioBalances>(`${API_BASE}/portfolio/balances`),
   intent: (mode?: string) =>
     fetchJson<IntentData>(
       `${API_BASE}/intent${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
