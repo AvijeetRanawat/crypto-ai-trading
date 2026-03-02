@@ -22,8 +22,34 @@ def get_runtime_context() -> dict:
     return {"session_id": _runtime_session_id(), "process_id": _runtime_process_id()}
 
 
+class _SafeConnection:
+    """Wraps sqlite3 Connection with auto-close on GC and context-manager support."""
+    __slots__ = ('_conn',)
+
+    def __init__(self, db_path):
+        self._conn = sqlite3.connect(db_path)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
 def _conn():
-    return sqlite3.connect(DB_PATH)
+    return _SafeConnection(DB_PATH)
 
 
 def _column_exists(cursor, table: str, column: str) -> bool:

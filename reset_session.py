@@ -6,7 +6,7 @@ but with all the hard-won wisdom from previous sessions intact.
 
 What gets CLEARED:
   - trades table (trade history)
-  - portfolio table (equity snapshots)  
+  - portfolio table (equity snapshots)
   - signal_events table (vote history)
   - prices table (raw price ticks)
 
@@ -18,6 +18,7 @@ Usage:
   python3 reset_session.py
 """
 import sqlite3
+from config import config
 from database import DB_PATH
 from logger import logger
 
@@ -54,12 +55,12 @@ def reset_session():
 
     logger.info(f"   ✅ Cleared: {trades_n} trades, {port_n} portfolio snapshots, {sig_n} signal events, {price_n} price ticks")
     logger.info(f"   ✅ Preserved: {lessons_n} lessons (all golden rules and self-critiques kept)")
-    logger.info("🆕 Session is RESET. Starting fresh with $1,250 balance and accumulated wisdom.")
+    logger.info("🆕 Session is RESET. Starting fresh with $%.0f balance and accumulated wisdom.", config.STARTING_BALANCE_USDT)
     print()
     print("=" * 60)
     print("  SESSION RESET COMPLETE")
     print(f"  {lessons_n} lessons PRESERVED for next session")
-    print("  Balance reset to $1,250")
+    print(f"  Balance reset to ${config.STARTING_BALANCE_USDT:,.0f}")
     print("  Run: python3 run.py")
     print("=" * 60)
 

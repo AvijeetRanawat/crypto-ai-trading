@@ -1,5 +1,8 @@
 export const API_BASE = "/api";
 
+/** Must match backend config.STARTING_BALANCE_USDT */
+export const STARTING_BALANCE = 1250;
+
 export const STORAGE_KEYS = {
   theme: "dashboard-theme",
   panelWidth: "ai-panel-width",

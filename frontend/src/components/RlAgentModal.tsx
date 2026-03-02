@@ -45,17 +45,25 @@ export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentMo
   const [draft, setDraft] = useState<Record<string, number | boolean | null>>({});
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState("");
+  const [isDirty, setIsDirty] = useState(false);
   const modeRows = stateRowsForMode(weights, activeMode);
   const modeProfiles = weights.profiles?.[activeMode] || {};
   const tunableSettings = useMemo(() => (tuning.settings || []), [tuning.settings]);
 
+  // Sync activeMode when parent mode changes
   useEffect(() => {
+    setActiveMode(initialMode);
+  }, [initialMode]);
+
+  useEffect(() => {
+    // Only sync draft from server when user hasn't made local edits
+    if (isDirty) return;
     const next: Record<string, number | boolean | null> = {};
     for (const item of tuning.settings || []) {
       next[item.key] = item.value as number | boolean;
     }
     setDraft(next);
-  }, [tuning]);
+  }, [tuning, isDirty]);
 
   if (!open) return null;
 
@@ -69,6 +77,7 @@ export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentMo
       return;
     }
     setSaveStatus("Saved");
+    setIsDirty(false);
   };
 
   const onReset = async () => {
@@ -84,6 +93,7 @@ export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentMo
       return;
     }
     setSaveStatus("Reset to defaults");
+    setIsDirty(false);
   };
 
   return (
@@ -206,12 +216,13 @@ export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentMo
                           id={setting.key}
                           type="checkbox"
                           checked={Boolean(val)}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            setIsDirty(true);
                             setDraft((prev) => ({
                               ...prev,
                               [setting.key]: e.target.checked,
-                            }))
-                          }
+                            }));
+                          }}
                         />
                       </label>
                     ) : (
@@ -225,15 +236,16 @@ export function RlAgentModal({ open, mode, weights, tuning, onClose }: RlAgentMo
                           min={setting.min}
                           max={setting.max}
                           value={typeof val === "number" ? val : Number(setting.value)}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            setIsDirty(true);
                             setDraft((prev) => ({
                               ...prev,
                               [setting.key]:
                                 setting.type === "int"
                                   ? Number.parseInt(e.target.value || "0", 10)
                                   : Number.parseFloat(e.target.value || "0"),
-                            }))
-                          }
+                            }));
+                          }}
                         />
                       </label>
                     )}

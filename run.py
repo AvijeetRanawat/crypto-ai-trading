@@ -148,10 +148,12 @@ if __name__ == "__main__":
 
     init_db()
 
-    # ── Reset Session Data ──
-    from reset_session import reset_session
-
-    reset_session()
+    # ── Reset Session Data (only if RESET_ON_RESTART is set) ──
+    if _env_bool("RESET_ON_RESTART", False):
+        from reset_session import reset_session
+        reset_session()
+    else:
+        logger.info("Preserving previous session data (set RESET_ON_RESTART=true to clear).")
 
     auto_restart = _env_bool("AUTO_RESTART_ON_BACKEND_CHANGES", True)
 

@@ -4,6 +4,7 @@ import random
 import threading
 from datetime import datetime
 
+import config
 from logger import logger
 
 try:
@@ -330,12 +331,18 @@ class RLWeightAgent:
                 profile_id,
                 {"weight_mult": {}, "size_mult": 1.0, "confidence_bias": 0.0, "sentiment_gate_mult": 1.0},
             )
+
+            # ── Persistent learned weights: accumulate via profile-conditioned gradient ──
+            learned = self._get_or_init_learned_weights(mode, state_key, profile_id)
+            adapted_weights = dict(learned.get("wm", {})) or dict(profile.get("weight_mult", {}))
+            adapted_voter_weights = dict(learned.get("vm", {})) or dict(profile.get("voter_weight_mult", {}))
+
             return {
                 "mode": mode,
                 "state_key": state_key,
                 "profile_id": profile_id,
-                "weight_mult": dict(profile.get("weight_mult", {})),
-                "voter_weight_mult": dict(profile.get("voter_weight_mult", {})),
+                "weight_mult": adapted_weights,
+                "voter_weight_mult": adapted_voter_weights,
                 "size_mult": float(profile.get("size_mult", 1.0) or 1.0),
                 "leverage_mult": float(profile.get("leverage_mult", 1.0) or 1.0),
                 "confidence_bias": float(profile.get("confidence_bias", 0.0) or 0.0),
@@ -344,6 +351,109 @@ class RLWeightAgent:
                 "q_value": float(q_mode.get(profile_id, 0.0)),
                 "epsilon": float(self.epsilon),
             }
+
+    def _get_or_init_learned_weights(self, mode: str, state_key: str, profile_id: str) -> dict:
+        """
+        Get persistently stored learned weights for (mode, state_key).
+        Initializes from selected profile's defaults on first access.
+        All weight keys from every profile in this mode are included so that
+        cross-profile learning can happen (each profile proposes direction
+        for every key).
+        """
+        w_table = self.state.setdefault("w", {}).setdefault(mode, {})
+        entry = w_table.get(state_key)
+        if entry is not None:
+            return entry
+
+        # Collect the union of weight keys across all profiles for this mode
+        all_wm_keys: set = set()
+        all_vm_keys: set = set()
+        for pdata in self.profiles.get(mode, {}).values():
+            all_wm_keys.update(pdata.get("weight_mult", {}).keys())
+            all_vm_keys.update(pdata.get("voter_weight_mult", {}).keys())
+
+        # Seed from selected profile; missing keys default to 1.0 (neutral)
+        selected = self.profiles.get(mode, {}).get(profile_id, {})
+        wm = {k: round(float(selected.get("weight_mult", {}).get(k, 1.0)), 4) for k in all_wm_keys}
+        vm = {k: round(float(selected.get("voter_weight_mult", {}).get(k, 1.0)), 4) for k in all_vm_keys}
+
+        entry = {"wm": wm, "vm": vm, "reward_ema": 0.0}
+        w_table[state_key] = entry
+        return entry
+
+    def _update_learned_weights(self, mode: str, state_key: str, profile_id: str, reward: float, prev_n: int):
+        """
+        Update persistently stored learned weights using profile-conditioned gradient.
+
+        Each profile's weight_mult values act as *directional proposals*.  When a
+        profile is selected and the resulting reward exceeds the running baseline
+        (positive advantage), learned weights are nudged toward that profile's
+        proposals.  Negative advantage nudges them away.
+
+        This replaces the old _adapt_weight_mult which produced ~0.01% changes
+        because it derived adjustments from near-zero Q-value differences.
+        The new approach:
+          1. Stores weights persistently — changes accumulate.
+          2. Uses normalized reward advantage (~0.1–1.0 range) instead of raw
+             Q-value deltas (~0.001).
+          3. Profile proposals provide per-key gradient direction automatically.
+          4. Exploration noise (30% chance per update, decaying with evidence)
+             lets weights explore directions not covered by any profile.
+        """
+        if prev_n < 3:
+            return  # Need minimum evidence before adapting
+
+        w_table = self.state.setdefault("w", {}).setdefault(mode, {})
+        entry = w_table.get(state_key)
+        if entry is None:
+            return
+
+        # ── Update reward baseline (EMA) ──
+        baseline = float(entry.get("reward_ema", 0.0) or 0.0)
+        ema_decay = 0.95
+        new_baseline = baseline * ema_decay + reward * (1 - ema_decay)
+        entry["reward_ema"] = round(new_baseline, 8)
+
+        # ── Normalized advantage ──
+        advantage = (reward - baseline) / max(abs(baseline), 0.002)
+        advantage = max(-1.0, min(1.0, advantage))
+
+        if abs(advantage) < 0.01:
+            return  # Negligible signal — skip to avoid noise accumulation
+
+        # ── Profile-conditioned gradient update ──
+        profile = self.profiles.get(mode, {}).get(profile_id, {})
+        weight_lr = float(getattr(config, "RL_WEIGHT_ADAPT_LR", 0.15))
+
+        for w_key, p_key in (("wm", "weight_mult"), ("vm", "voter_weight_mult")):
+            profile_w = profile.get(p_key, {})
+            learned_w = entry.get(w_key, {})
+            if not learned_w:
+                continue
+
+            # Ensure all profile keys exist in learned weights
+            for key in profile_w:
+                if key not in learned_w:
+                    learned_w[key] = round(float(profile_w[key]), 4)
+
+            for key in list(learned_w.keys()):
+                current = float(learned_w[key])
+                profile_target = float(profile_w.get(key, 1.0))
+                if advantage > 0:
+                    # Positive: reinforce profile's bets — move toward profile target
+                    diff = profile_target - current
+                else:
+                    # Negative: dampen toward neutral (1.0)
+                    diff = 1.0 - current
+                adjustment = weight_lr * abs(advantage) * diff
+                learned_w[key] = round(max(0.5, min(2.0, current + adjustment)), 4)
+
+            # Exploration noise: 30% chance, decays with evidence
+            if random.random() < 0.3:
+                noise_std = 0.015 / (1.0 + prev_n * 0.005)
+                for key in learned_w:
+                    noisy = float(learned_w[key]) + random.gauss(0, noise_std)
+                    learned_w[key] = round(max(0.5, min(2.0, noisy)), 4)
 
     def update(self, mode: str, state_key: str, profile_id: str, reward: float):
         if not self.enabled:
@@ -360,8 +470,32 @@ class RLWeightAgent:
             new_q = prev_q + alpha * (reward - prev_q)
             q_mode[profile_id] = round(new_q, 8)
             n_mode[profile_id] = prev_n + 1
-            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
-            self._save()
+
+            # ── Epsilon warm-restart: if all Q-values for this mode are ≤ 0
+            # and we have 100+ updates, the agent has never seen a trade reward.
+            # Boost epsilon to re-explore instead of exploiting worthless Q-values.
+            all_q_neg = all(
+                float(q_row.get(pid, 0.0) or 0.0) <= 0
+                for q_row in self.state["q"].get(mode, {}).values()
+                for pid in q_row
+            )
+            mode_total_n = sum(
+                sum(v.values()) for v in self.state["n"].get(mode, {}).values()
+            )
+            if all_q_neg and mode_total_n > 100:
+                # Keep epsilon at a meaningful exploration level
+                self.epsilon = max(self.epsilon, 0.15)
+            else:
+                self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+
+            # ── Update persistent learned weights ──
+            self._update_learned_weights(mode, state_key, profile_id, reward, prev_n)
+
+            # Batched save: persist every 10 updates to reduce I/O
+            self._unsaved_updates = getattr(self, '_unsaved_updates', 0) + 1
+            if self._unsaved_updates >= 10:
+                self._save()
+                self._unsaved_updates = 0
             logger.info(
                 "RL_UPDATE mode=%s state=%s profile=%s reward=%.5f q_prev=%.5f q_new=%.5f n=%s eps=%.4f",
                 mode,
@@ -373,6 +507,13 @@ class RLWeightAgent:
                 prev_n + 1,
                 self.epsilon,
             )
+
+    def flush(self):
+        """Force-save any pending unsaved updates."""
+        with self._lock:
+            if getattr(self, '_unsaved_updates', 0) > 0:
+                self._save()
+                self._unsaved_updates = 0
 
 
 
@@ -414,10 +555,32 @@ class MLXWeightAgent:
             return
         try:
             if os.path.exists(self.state_file):
-                # Placeholder for future persistence; current model is trained online.
-                pass
+                with open(self.state_file, "r") as f:
+                    data = json.load(f)
+                mlx_meta = data.get("mlx_meta", {})
+                self.epsilon = float(mlx_meta.get("epsilon", self.epsilon))
+                logger.info("MLX RL state loaded: epsilon=%.4f", self.epsilon)
         except Exception as e:
             logger.warning("MLX RL state load failed: %s", e)
+
+    def _save_state(self):
+        """Persist MLX agent metadata alongside the tabular RL weights file."""
+        if not self.enabled:
+            return
+        try:
+            data = {}
+            if os.path.exists(self.state_file):
+                with open(self.state_file, "r") as f:
+                    data = json.load(f)
+            data["mlx_meta"] = {
+                "epsilon": round(self.epsilon, 6),
+            }
+            tmp = self.state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.state_file)
+        except Exception as e:
+            logger.warning("MLX RL state save failed: %s", e)
 
     def _ensure_model(self, mode: str):
         if mode in self.models:
@@ -544,6 +707,11 @@ class MLXWeightAgent:
             loss, grads = mx.value_and_grad(loss_fn)(model.parameters())
             opt.update(model.parameters(), grads)
             mx.eval(model.parameters(), loss)
+            # Batched persistence: save every 10 updates
+            self._mlx_unsaved = getattr(self, '_mlx_unsaved', 0) + 1
+            if self._mlx_unsaved >= 10:
+                self._save_state()
+                self._mlx_unsaved = 0
             logger.info(
                 "MLX_RL_UPDATE mode=%s profile=%s reward=%.6f loss=%.6f eps=%.4f",
                 mode,

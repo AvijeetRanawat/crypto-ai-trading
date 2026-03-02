@@ -90,5 +90,6 @@ def test_exit_position_closes_and_logs(monkeypatch):
     }
 
     res = sim.exit_position("SOLUSDT", current_price=12, reason="target")
-    assert res["pnl"] == pytest.approx(2.0)
+    # raw_profit = (12 - 10) * 1 = 2.0; fee = 10 * 0.0012 = 0.012; net = 1.988
+    assert res["pnl"] == pytest.approx(1.988, abs=0.001)
     assert exit_updates["trade_id"] == 101

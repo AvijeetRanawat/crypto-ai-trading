@@ -11,8 +11,26 @@ from logger import logger, log_trade
 
 class PaperTradingSimulator:
     def __init__(self):
-        self.balance_usdt = 1_250.0
+        self.balance_usdt = float(config.STARTING_BALANCE_USDT)
         self.positions = {}
+
+    def total_equity(self, latest_prices: dict | None = None) -> float:
+        """Return cash + unrealized value of all open positions.
+
+        If *latest_prices* is ``None``, positions are valued at their entry
+        price (i.e. equity == session_start_balance when no PnL has occurred).
+        """
+        equity = self.balance_usdt
+        for pos in self.positions.values():
+            symbol = pos.get("symbol", "")
+            qty = pos.get("quantity", 0.0)
+            entry = pos.get("entry_price", 0.0)
+            cur = (latest_prices or {}).get(symbol, entry)
+            if pos.get("side") == "LONG":
+                equity += qty * cur
+            else:  # SHORT
+                equity += qty * (2 * entry - cur)
+        return equity
 
     @staticmethod
     def _pos_key(symbol: str, mode: str) -> str:
@@ -77,7 +95,8 @@ class PaperTradingSimulator:
         save_portfolio_snapshot(self.balance_usdt, len(self.positions))
 
         emoji = "📈" if side == "LONG" else "📉"
-        logger.info(f"{emoji} {side}: {symbol} at ${price:,.2f} | Size: ${amount_usdt:,.0f} | Bal: ${self.balance_usdt:,.0f}")
+        price_fmt = f"${price:,.2f}" if price >= 1.0 else f"${price:.6f}"
+        logger.info(f"{emoji} {side}: {symbol} at {price_fmt} | Size: ${amount_usdt:,.0f} | Bal: ${self.balance_usdt:,.0f}")
         return True
 
     def add_to_position(self, symbol, price, amount_usdt, reason, mode=None):
@@ -107,8 +126,7 @@ class PaperTradingSimulator:
         self.balance_usdt -= amount_usdt
         pos["quantity"] = new_qty
         pos["entry_price"] = new_entry
-        pos["peak_pnl_pct"] = 0.0
-        pos["trailing_active"] = False
+        # Preserve trailing stop state on pyramid — resetting would remove protective stops
         pos["entry_reason"] = f"{pos.get('entry_reason', '')} | {reason}".strip(" |")
 
         save_portfolio_snapshot(self.balance_usdt, len(self.positions))
@@ -134,15 +152,24 @@ class PaperTradingSimulator:
         side = pos["side"]
 
         if side == "LONG":
-            revenue = pos["quantity"] * current_price
-            profit = revenue - (pos["quantity"] * pos["entry_price"])
+            raw_profit = (current_price - pos["entry_price"]) * pos["quantity"]
         else:
-            profit = (pos["entry_price"] - current_price) * pos["quantity"]
-            revenue = (pos["quantity"] * pos["entry_price"]) + profit
+            raw_profit = (pos["entry_price"] - current_price) * pos["quantity"]
 
+        # Apply leverage multiplier for FUTURES mode
+        leverage = float(pos.get("recommended_leverage", 1) or 1)
+        if mode == "FUTURES" and leverage > 1:
+            raw_profit *= leverage
+
+        # Deduct fee/slippage buffer from PnL
+        notional = pos["quantity"] * pos["entry_price"]
+        fee_cost = notional * (config.FEE_SLIPPAGE_BUFFER_PCT / 100.0)
+        profit = raw_profit - fee_cost
+
+        revenue = (pos["quantity"] * pos["entry_price"]) + profit
         self.balance_usdt += revenue
         exit_time = datetime.now()
-        hold_secs = (exit_time - pos["entry_time"]).seconds
+        hold_secs = int((exit_time - pos["entry_time"]).total_seconds())
 
         update_trade_exit(pos["db_id"], exit_time, profit)
         pnl_str = f"+${profit:.2f}" if profit >= 0 else f"-${abs(profit):.2f}"
@@ -153,8 +180,9 @@ class PaperTradingSimulator:
         save_portfolio_snapshot(self.balance_usdt, len(self.positions))
 
         emoji = "✅" if profit >= 0 else "❌"
+        cp_fmt = f"${current_price:,.2f}" if current_price >= 1.0 else f"${current_price:.6f}"
         logger.info(
-            f"{emoji} CLOSED {side} {symbol} ({mode}) at ${current_price:,.2f} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}"
+            f"{emoji} CLOSED {side} {symbol} ({mode}) at {cp_fmt} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}"
         )
 
         return {

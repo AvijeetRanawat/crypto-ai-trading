@@ -1,22 +1,64 @@
 import json
+import requests
 
 from config import config
 from logger import logger
 from database import get_recent_lessons, save_lesson
 
+
+def _call_llm(prompt: str, bedrock_client=None, max_tokens: int = 400, temperature: float = 0.3) -> str | None:
+    """Call LLM via Bedrock or OpenAI depending on provider config."""
+    if config.LLM_PROVIDER == "OPENAI" and config.OPENAI_API_KEY:
+        try:
+            resp = requests.post(
+                f"{config.OPENAI_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": config.OPENAI_MODEL_ID,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"OpenAI LLM call failed: {e}")
+            return None
+    elif bedrock_client:
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        })
+        try:
+            response = bedrock_client.invoke_model(
+                body=body,
+                modelId=config.BEDROCK_MODEL_ID,
+                accept="application/json",
+                contentType="application/json",
+            )
+            return json.loads(response.get("body").read()).get("content")[0].get("text", "").strip()
+        except Exception as e:
+            logger.error(f"Bedrock LLM call failed: {e}")
+            return None
+    return None
+
 class MetaOptimizer:
     """
     Post-Session Meta-Learning Agent.
     After a full session of trades, this agent reads ALL accumulated lessons,
-    asks Claude to distill them into 3 "golden rules", and stores
+    asks the LLM to distill them into 3 "golden rules", and stores
     the optimized ruleset for future sessions to bootstrap from.
     """
-    def __init__(self, bedrock_client):
+    def __init__(self, bedrock_client=None):
         self.bedrock = bedrock_client
 
     def optimize(self):
-        if not self.bedrock:
-            logger.warning("Meta-Optimizer skipped: no Bedrock client.")
+        if not self.bedrock and not (config.LLM_PROVIDER == "OPENAI" and config.OPENAI_API_KEY):
+            logger.warning("Meta-Optimizer skipped: no LLM client available.")
             return
 
         lessons = get_recent_lessons(limit=20)
@@ -52,26 +94,19 @@ Output strictly valid JSON, no markdown:
 }}
 """
 
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 400,
-            "temperature": 0.3,
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": prompt}]}
-            ]
-        })
-
         try:
             logger.info("🎓 Meta-Optimizer: Distilling lessons into Golden Rules...")
-            response = self.bedrock.invoke_model(
-                body=body,
-                modelId=config.BEDROCK_MODEL_ID,
-                accept="application/json",
-                contentType="application/json"
-            )
+            llm_text = _call_llm(prompt, bedrock_client=self.bedrock, max_tokens=400, temperature=0.3)
+            if not llm_text:
+                logger.error("Meta-Optimizer: No response from LLM.")
+                return None
 
-            response_body = json.loads(response.get('body').read())
-            llm_text = response_body.get('content')[0].get('text')
+            # Strip markdown fences if present
+            if llm_text.startswith("```"):
+                parts = llm_text.split("```")
+                llm_text = parts[1].strip() if len(parts) > 1 else parts[-1].strip()
+                if llm_text.lower().startswith("json"):
+                    llm_text = llm_text[4:].strip()
             result = json.loads(llm_text)
 
             golden_rules = result.get("golden_rules", [])

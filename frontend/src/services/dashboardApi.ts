@@ -27,9 +27,13 @@ async function fetchJson<T>(path: string): Promise<T | null> {
         Pragma: "no-cache",
       },
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.warn(`[dashboardApi] GET ${path} returned ${response.status}`);
+      return null;
+    }
     return (await response.json()) as T;
-  } catch {
+  } catch (err) {
+    console.warn(`[dashboardApi] GET ${path} failed`, err);
     return null;
   }
 }
@@ -46,9 +50,13 @@ async function putJson<T>(path: string, body: unknown): Promise<T | null> {
       },
       body: JSON.stringify(body),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.warn(`[dashboardApi] PUT ${path} returned ${response.status}`);
+      return null;
+    }
     return (await response.json()) as T;
-  } catch {
+  } catch (err) {
+    console.warn(`[dashboardApi] PUT ${path} failed`, err);
     return null;
   }
 }

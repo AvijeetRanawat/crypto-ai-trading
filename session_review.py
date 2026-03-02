@@ -142,7 +142,10 @@ Output ONLY valid JSON, no markdown:
         )
         raw = json.loads(resp.get("body").read()).get("content")[0].get("text", "").strip()
         if raw.startswith("```"):
-            raw = raw.split("```")[-2].lstrip("json").strip()
+            parts = raw.split("```")
+            raw = parts[1].strip() if len(parts) > 1 else parts[-1].strip()
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
         return json.loads(raw)
     except Exception as e:
         logger.error(f"Review LLM error: {e}")
@@ -267,7 +270,7 @@ def run_mini_review(
 def run_review():
     """Full end-of-session post-mortem."""
     try:
-        bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+        bedrock = boto3.client(service_name="bedrock-runtime", region_name=config.AWS_DEFAULT_REGION)
     except Exception as e:
         logger.error(f"Could not init Bedrock for review: {e}")
         return
@@ -309,4 +312,3 @@ def run_review():
 
 if __name__ == "__main__":
     run_review()
-

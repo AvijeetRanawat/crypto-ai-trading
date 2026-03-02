@@ -146,7 +146,7 @@ class CoinDCXClient:
             market_prefix = "I"
         fmt_symbol = f"{market_prefix}-{base}_{quote}"
         url = f"{public_url}/market_data/candles?pair={fmt_symbol}&interval={interval}"
-        
+
         # We need raw requests as it's a different base URL
         try:
             resp = requests.get(url, timeout=10)
@@ -163,7 +163,7 @@ class CoinDCXClient:
             logger.warning(f"Failed to fetch historical klines for {symbol}: {e}")
             return []
 
-    async def connect_ws(self, channels=None):
+    async def poll_prices(self, channels=None):
         """Polls ticker frequently to capture micro-momentum + 24h metadata."""
         if channels:
             requested = {str(s).upper() for s in channels}
@@ -193,7 +193,7 @@ class CoinDCXClient:
                                 continue
                             self.latest_prices[market] = last_price
                             database.save_price(market, last_price)
-                            
+
                             # ── POPULATE TICKER META (was missing!) ──
                             self.ticker_meta[market] = {
                                 'high': float(t.get('high', 0)),

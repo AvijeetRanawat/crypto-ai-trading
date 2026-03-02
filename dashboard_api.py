@@ -352,7 +352,8 @@ async def get_intent(mode: str = None):
         targets = json.loads(intent[3]) if intent[3] else []
     except Exception:
         try:
-            targets = eval(intent[3]) if intent[3] else []
+            import ast
+            targets = ast.literal_eval(intent[3]) if intent[3] else []
         except Exception:
             targets = []
     return {"timestamp": intent[1], "message": intent[2], "targets": targets}
@@ -441,9 +442,9 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
         mode = "SPOT"
 
     safe_limit = max(3, min(20, int(limit)))
-    mode_prefix = f"{mode}_%"
+    mode_prefix = f"{mode}\\_%"
     mode_and_global_filter = (
-        "COALESCE(decision_source, '') LIKE ? "
+        "COALESCE(decision_source, '') LIKE ? ESCAPE '\\' "
         f"OR COALESCE(decision_source, '') IN ({','.join('?' for _ in GLOBAL_STRATEGY_DECISION_SOURCES)})"
     )
     mode_and_global_params = (mode_prefix, *GLOBAL_STRATEGY_DECISION_SOURCES)
@@ -488,7 +489,7 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
         FROM trades
         WHERE symbol=? AND status='CLOSED' AND entry_time >= ?
         AND (session_id = ? OR session_id IS NULL)
-        AND COALESCE(decision_source, '') LIKE ?
+        AND COALESCE(decision_source, '') LIKE ? ESCAPE '\\'
         """,
         (symbol, SESSION_START, SESSION_ID, mode_prefix),
     )
@@ -530,7 +531,7 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
         SELECT reason
         FROM trades
         WHERE symbol=? AND entry_time >= ? AND (session_id = ? OR session_id IS NULL)
-        AND COALESCE(decision_source, '') LIKE ?
+        AND COALESCE(decision_source, '') LIKE ? ESCAPE '\\'
         ORDER BY id DESC
         LIMIT 1
         """,

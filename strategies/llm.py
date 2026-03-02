@@ -12,7 +12,7 @@ from database import get_recent_lessons, get_distilled_rules
 # Value: (Signal, timestamp)
 _response_cache: dict = {}
 _CACHE_TTL_SECONDS = 60
-
+_CACHE_MAX_SIZE = 256  # Prevent unbounded growth
 
 def _cache_key(rsi, macd, bb_pct, buy_votes, sell_votes, regime):
     """A lightweight representation of the current market state."""
@@ -25,8 +25,11 @@ def _strip_fences(text: str) -> str:
     text = (text or "").strip()
     if text.startswith("```"):
         parts = text.split("```")
-        text = parts[2].strip() if len(parts) > 2 else parts[-1].strip()
-        text = text.lstrip("json").strip()
+        # parts: ['', 'json\n{...}', ''] — the content is in parts[1]
+        text = parts[1].strip() if len(parts) > 1 else parts[-1].strip()
+        # Strip optional language tag (e.g. 'json')
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
     return text
 
 
@@ -330,12 +333,12 @@ Output strictly valid JSON (no markdown):
             usage_events.append(usage_event)
             result = json.loads(_strip_fences(llm_text))
             verdict = str(result.get("verdict", "NEUTRAL")).upper()
-            confidence = float(result.get("confidence", 0.0) or 0.0)
+            review_conf = float(result.get("confidence", 0.0) or 0.0)
             rationale = str(result.get("reason", ""))
             suggested = str(result.get("suggested_action", "SKIP")).upper()
             return {
                 "verdict": verdict,
-                "confidence": confidence,
+                "confidence": review_conf,
                 "reason": rationale,
                 "suggested_action": suggested,
             }, usage_events
@@ -362,11 +365,13 @@ Output strictly valid JSON (no markdown):
         direction = "BUY" if buy_votes >= sell_votes else "SELL"
         agreement = max(buy_votes, sell_votes)
 
+        regime_note = "" if regime in ("BULL", "BEAR") else " Note: CHOPPY regimes are tradeable if agreement is strong."
         prompt = (
             "You are a crypto trader.\n"
             f"Market snapshot: Regime={regime}, Direction={direction}, "
             f"Agreement={agreement}/8 tools, RSI={rsi:.1f}, MACD={macd}, BB={bb_pct:.0f}%\n\n"
-            "Question: Is this sufficiently strong and regime-aligned for a full analysis? "
+            "Question: Is this signal sufficiently strong for a full analysis? "
+            f"Consider agreement level and indicator alignment.{regime_note} "
             "Reply with exactly one word: PASS or SKIP."
         )
 
@@ -474,7 +479,7 @@ Session change: {session_change_pct:+.3f}%  |  Recent (1 tick): {recent_change_p
 </ALL_TOOLS>
 {lessons_ctx}
 
-REGIME RULE: Market is {regime}. {"Only consider LONG (BUY) trades." if regime == "BULL" else "Only consider SHORT (SELL) trades." if regime == "BEAR" else "Be conservative."}
+REGIME RULE: Market is {regime}. {"Only consider LONG (BUY) trades." if regime == "BULL" else "Only consider SHORT (SELL) trades." if regime == "BEAR" else "CHOPPY/ranging — trade only when technicals show strong directional agreement. Prefer setups with 3+ aligned signals." if regime == "CHOPPY" else "Be cautious — unclear regime."}
 
 Output strictly valid JSON (no markdown):
 {{
@@ -508,7 +513,15 @@ Output strictly valid JSON (no markdown):
                 meta={"llm_usage": usage_events, "decision_source": "LLM_TIEBREAKER"},
             )
             logger.info(f"🧠 {self.provider}: {action} ({confidence:.2f}) — {reason}")
-            _response_cache[key] = (sig, time.time())
+            # Prune expired entries and enforce max cache size
+            now_t = time.time()
+            expired = [k for k, (_, t) in _response_cache.items() if now_t - t > _CACHE_TTL_SECONDS]
+            for k in expired:
+                _response_cache.pop(k, None)
+            if len(_response_cache) >= _CACHE_MAX_SIZE:
+                oldest_key = min(_response_cache, key=lambda k: _response_cache[k][1])
+                _response_cache.pop(oldest_key, None)
+            _response_cache[key] = (sig, now_t)
             return sig
 
         except json.JSONDecodeError:

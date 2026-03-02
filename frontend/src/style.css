@@ -41,6 +41,8 @@
     --chart-y-tick: #374151;
     --log-bg: #eef2ff;
     --log-text: #0f172a;
+    --scrollbar-thumb: rgba(17, 24, 39, 0.25);
+    --scrollbar-border: rgba(17, 24, 39, 0.12);
 }
 
 * {
@@ -445,18 +447,6 @@ body {
     border-bottom: none;
 }
 
-.trade-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-}
-
-.trade-row:last-child {
-    border: none;
-}
 
 .t-info {
     display: flex;
@@ -1323,14 +1313,14 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.28);
+    background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.28));
     border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
+    border: 1px solid var(--scrollbar-border, rgba(255, 255, 255, 0.14));
 }
 
 * {
     scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+    scrollbar-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.28)) transparent;
 }
 
 /* ── ENGINE v6 ADDITIONS ─────────────────────────────────────────────────── */

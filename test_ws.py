@@ -6,10 +6,10 @@ async def test_ws():
     logger.info("Testing WebSocket (Socket.io) connectivity...")
     # Subscribe to BTCUSDT and ETHUSDT
     channels = ["BTCUSDT", "ETHUSDT"]
-    
+
     # Run the listener in the background
-    listener = asyncio.create_task(client.connect_ws(channels))
-    
+    listener = asyncio.create_task(client.poll_prices(channels))
+
     logger.info("Waiting for data (15 seconds)...")
     for _ in range(15):
         await asyncio.sleep(1)
@@ -18,7 +18,7 @@ async def test_ws():
             break
     else:
         logger.error("No WebSocket data received.")
-        
+
     listener.cancel()
     try:
         await listener

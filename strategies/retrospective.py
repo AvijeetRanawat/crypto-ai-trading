@@ -1,23 +1,65 @@
 import json
+import requests
 
 from config import config
 from logger import logger
 from database import save_lesson
 
+
+def _call_llm(prompt: str, bedrock_client=None, max_tokens: int = 300, temperature: float = 0.3) -> str | None:
+    """Call LLM via Bedrock or OpenAI depending on provider config."""
+    if config.LLM_PROVIDER == "OPENAI" and config.OPENAI_API_KEY:
+        try:
+            resp = requests.post(
+                f"{config.OPENAI_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": config.OPENAI_MODEL_ID,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"OpenAI LLM call failed: {e}")
+            return None
+    elif bedrock_client:
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        })
+        try:
+            response = bedrock_client.invoke_model(
+                body=body,
+                modelId=config.BEDROCK_MODEL_ID,
+                accept="application/json",
+                contentType="application/json",
+            )
+            return json.loads(response.get("body").read()).get("content")[0].get("text", "").strip()
+        except Exception as e:
+            logger.error(f"Bedrock LLM call failed: {e}")
+            return None
+    return None
+
 class RetrospectiveAgent:
     """
     Post-Trade Retrospective Agent.
-    After every trade closes, this agent sends the trade details to Claude
+    After every trade closes, this agent sends the trade details to the LLM
     and asks it to reason about WHY the trade succeeded or failed,
     then extracts a concise lesson to store in the database.
     Future trades will read these lessons to avoid repeating mistakes.
     """
-    def __init__(self, bedrock_client):
+    def __init__(self, bedrock_client=None):
         self.bedrock = bedrock_client
 
     def analyze_trade(self, symbol, side, entry_price, exit_price, hold_secs, entry_reason, pnl):
-        if not self.bedrock:
-            logger.warning("Retrospective skipped: no Bedrock client.")
+        if not self.bedrock and not (config.LLM_PROVIDER == "OPENAI" and config.OPENAI_API_KEY):
+            logger.warning("Retrospective skipped: no LLM client available.")
             return
 
         outcome = "PROFIT" if pnl >= 0 else "LOSS"
@@ -47,26 +89,18 @@ JSON FORMAT:
 }}
 """
 
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 300,
-            "temperature": 0.3,
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": prompt}]}
-            ]
-        })
-
         try:
             logger.info(f"🔬 Retrospective Agent analyzing {outcome} trade on {symbol}...")
-            response = self.bedrock.invoke_model(
-                body=body,
-                modelId=config.BEDROCK_MODEL_ID,
-                accept="application/json",
-                contentType="application/json"
-            )
+            llm_text = _call_llm(prompt, bedrock_client=self.bedrock, max_tokens=300, temperature=0.3)
+            if not llm_text:
+                raise ValueError("No LLM response")
 
-            response_body = json.loads(response.get('body').read())
-            llm_text = response_body.get('content')[0].get('text')
+            # Strip markdown fences if present
+            if llm_text.startswith("```"):
+                parts = llm_text.split("```")
+                llm_text = parts[1].strip() if len(parts) > 1 else parts[-1].strip()
+                if llm_text.lower().startswith("json"):
+                    llm_text = llm_text[4:].strip()
             result = json.loads(llm_text)
 
             why = result.get("why", "No explanation")

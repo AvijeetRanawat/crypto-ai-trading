@@ -1,14 +1,18 @@
 class Signal:
-    def __init__(self, action: str, confidence: float, weight: float, reason: str, meta: dict = None):
+    def __init__(self, action: str, confidence: float, weight: float, reason: str, meta: dict = None, allow_unclamped: bool = False):
         """
         :param action: 'BUY', 'SELL', or 'HOLD'
-        :param confidence: 0.0 to 1.0 probability of success
+        :param confidence: 0.0 to 1.0 probability of success (or >1.0 for multiplier signals)
         :param weight: Multiplier for this strategy's importance
         :param reason: Human-readable explanation
         :param meta: Optional structured metadata for downstream attribution.
+        :param allow_unclamped: If True, confidence is not clamped to [0,1] (for multiplier signals).
         """
         self.action = action.upper()
-        self.confidence = max(0.0, min(1.0, confidence))
+        if allow_unclamped:
+            self.confidence = max(0.0, confidence)
+        else:
+            self.confidence = max(0.0, min(1.0, confidence))
         self.weight = weight
         self.reason = reason
         self.meta = meta or {}

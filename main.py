@@ -8,16 +8,16 @@ from database import init_db
 async def main():
     logger.info(f"Initializing {config.EXCHANGE} Trading Agent with WebSocket support...")
     init_db()
-    
+
     engine = TradingEngine(client)
-    
+
     # Use blue-chip whitelist as channels
     channels = config.BLUE_CHIP_WHITELIST
-    
+
     try:
         # Run all tasks concurrently (shared balance across modes).
         tasks = [
-            client.connect_ws(channels),
+            client.poll_prices(channels),
             engine.run_loop("SPOT"),
             engine.run_loop("FUTURES"),
             engine.run_loop("OPTIONS"),

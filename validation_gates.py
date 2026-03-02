@@ -39,10 +39,20 @@ def main():
     _gate("Quality sample size", closed_n >= 150, f"closed trades={closed_n} (need >=150)")
     _gate("Net expectancy", avg_pnl > 0, f"avg pnl/trade={avg_pnl:.6f}")
 
-    # Gate 4: drawdown
-    cur.execute("SELECT COALESCE(MAX(balance_usdt),0), COALESCE(MIN(balance_usdt),0) FROM portfolio")
-    max_bal, min_bal = cur.fetchone()
-    drawdown = max(0.0, (max_bal or 0) - (min_bal or 0))
+    # Gate 4: drawdown — peak-to-trough max drawdown, not simple range
+    cur.execute("""
+        SELECT balance_usdt FROM portfolio ORDER BY rowid ASC
+    """)
+    balances = [row[0] for row in cur.fetchall()]
+    drawdown = 0.0
+    if balances:
+        peak = balances[0]
+        for bal in balances:
+            if bal > peak:
+                peak = bal
+            dd = peak - bal
+            if dd > drawdown:
+                drawdown = dd
     _gate(
         "Drawdown cap",
         drawdown <= config.MAX_DAILY_DRAWDOWN_USD,

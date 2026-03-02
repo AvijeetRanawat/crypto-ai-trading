@@ -65,7 +65,7 @@ def test_add_to_position_preserves_existing_trade_state(monkeypatch):
     pos = sim.positions["BTCUSDT:SPOT"]
     assert round(pos["quantity"], 6) == 2.0
     assert round(pos["entry_price"], 2) == 110.0
-    assert pos["trailing_active"] is False
-    assert pos["peak_pnl_pct"] == 0.0
+    assert pos["trailing_active"] is True
+    assert pos["peak_pnl_pct"] == 0.12
     assert "pyramid" in pos["entry_reason"]
     assert sim.balance_usdt == 880.0

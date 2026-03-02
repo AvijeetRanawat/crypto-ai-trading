@@ -9,8 +9,51 @@ The response is stored as a SELF_CRITIQUE lesson, which gets injected into
 future prompts to teach Claude when to pull the trigger.
 """
 import json
+import requests
+from config import config
 from database import get_missed_opportunities, save_lesson
 from logger import logger
+
+
+def _call_llm(prompt: str, bedrock_client=None, model_id: str = None, max_tokens: int = 400, temperature: float = 0.2) -> str | None:
+    """Call LLM via Bedrock or OpenAI depending on provider config."""
+    if config.LLM_PROVIDER == "OPENAI" and config.OPENAI_API_KEY:
+        try:
+            resp = requests.post(
+                f"{config.OPENAI_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": config.OPENAI_MODEL_ID,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"OpenAI LLM call failed: {e}")
+            return None
+    elif bedrock_client:
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        })
+        try:
+            response = bedrock_client.invoke_model(
+                body=body,
+                modelId=model_id or config.BEDROCK_MODEL_ID,
+                accept="application/json",
+                contentType="application/json",
+            )
+            return json.loads(response.get("body").read()).get("content")[0].get("text", "").strip()
+        except Exception as e:
+            logger.error(f"Bedrock LLM call failed: {e}")
+            return None
+    return None
 
 
 class MissedOpportunityAnalyzer:
@@ -76,20 +119,18 @@ Identify the TOP 2 self-improvement rules in this EXACT JSON format:
 
 Output only valid JSON, no markdown."""
 
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 400,
-            "temperature": 0.2,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        })
-
         try:
-            response = self.bedrock.invoke_model(
-                body=body, modelId=self.model_id,
-                accept="application/json", contentType="application/json"
-            )
-            body_text = json.loads(response.get('body').read())
-            result_text = body_text.get('content')[0].get('text')
+            result_text = _call_llm(prompt, bedrock_client=self.bedrock, model_id=self.model_id, max_tokens=400, temperature=0.2)
+            if not result_text:
+                logger.error("MissedOpportunityAnalyzer: No response from LLM.")
+                return
+
+            # Strip markdown fences if present
+            if result_text.startswith("```"):
+                parts = result_text.split("```")
+                result_text = parts[1].strip() if len(parts) > 1 else parts[-1].strip()
+                if result_text.lower().startswith("json"):
+                    result_text = result_text[4:].strip()
             result = json.loads(result_text)
 
             for rule in result.get("rules", []):

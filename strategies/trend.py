@@ -18,14 +18,14 @@ class TrendAgent(BaseStrategy):
 
         # Extreme crash: Suppress all buys
         if change < -10.0:
-            return Signal("HOLD", 0.1, self.weight, "Severe Crash (-10%+) — Suppressing Buys")
+            return Signal("HOLD", 0.1, self.weight, "Severe Crash (-10%+) — Suppressing Buys", allow_unclamped=True)
 
         # Heavy dip: Reduce buy confidence by half
         if change < -5.0:
-            return Signal("HOLD", 0.5, self.weight, "Heavy Dip (-5%+) — Caution")
+            return Signal("HOLD", 0.5, self.weight, "Heavy Dip (-5%+) — Caution", allow_unclamped=True)
 
         # Healthy market: Green light
         if change > 2.0:
-            return Signal("HOLD", 1.2, self.weight, "Strong Uptrend (+2%+) — Boosting Buys")
+            return Signal("HOLD", 1.2, self.weight, "Strong Uptrend (+2%+) — Boosting Buys", allow_unclamped=True)
 
-        return Signal("HOLD", 1.0, self.weight, "Stable trend")
+        return Signal("HOLD", 1.0, self.weight, "Stable trend", allow_unclamped=True)

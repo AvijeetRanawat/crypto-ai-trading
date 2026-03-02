@@ -22,15 +22,15 @@ class VolatilityScanner:
     def analyze(history: list) -> dict:
         if len(history) < 10:
             return {"volatility_pct": 0.0, "verdict": "Insufficient data", "tradeable": False}
-        
+
         recent = history[-60:]  # Last 60 min of 1m ticks
         mean = statistics.mean(recent)
         if mean == 0:
             return {"volatility_pct": 0.0, "verdict": "Dead market", "tradeable": False}
-        
+
         stdev = statistics.stdev(recent)
         vol_pct = (stdev / mean) * 100
-        
+
         if vol_pct < 0.005:
             verdict = "DEAD — No movement, do NOT trade"
             tradeable = False
@@ -110,11 +110,11 @@ class VolumeProfile:
         volume = meta.get('volume', 0)
         bid = meta.get('bid', 0)
         ask = meta.get('ask', 0)
-        
+
         spread_pct = 0.0
         if bid > 0 and ask > 0:
             spread_pct = ((ask - bid) / bid) * 100
-        
+
         if volume < 1:
             verdict = "ZERO VOLUME — Market is closed or stale"
             liquid = False
@@ -127,7 +127,7 @@ class VolumeProfile:
         else:
             verdict = "HEALTHY — Good liquidity"
             liquid = True
-            
+
         return {
             "volume_24h": round(volume, 2),
             "bid": bid,
@@ -148,20 +148,20 @@ class OrderBookPressure:
     def analyze(meta: dict, current_price: float) -> dict:
         bid = meta.get('bid', 0)
         ask = meta.get('ask', 0)
-        
+
         if bid <= 0 or ask <= 0:
             return {"pressure": "UNKNOWN", "bias": 0.0}
-        
+
         midpoint = (bid + ask) / 2
         bias = (current_price - midpoint) / midpoint * 100
-        
+
         if current_price > midpoint:
             pressure = "BULLISH — Price above bid/ask midpoint"
         elif current_price < midpoint:
             pressure = "BEARISH — Price below bid/ask midpoint"
         else:
             pressure = "NEUTRAL — At midpoint"
-            
+
         return {"pressure": pressure, "bias": round(bias, 4), "bid": bid, "ask": ask}
 
 
@@ -176,14 +176,14 @@ class SessionTracker:
         self.trades = []
         self.wins = 0
         self.losses = 0
-    
+
     def record_trade(self, pnl: float):
         self.trades.append(pnl)
         if pnl >= 0:
             self.wins += 1
         else:
             self.losses += 1
-    
+
     def get_stats(self) -> dict:
         total = len(self.trades)
         if total == 0:
@@ -193,10 +193,10 @@ class SessionTracker:
                 "avg_win": 0, "avg_loss": 0,
                 "recommendation": "First trade — use moderate confidence"
             }
-        
+
         win_rate = (self.wins / total) * 100
         cum_pnl = sum(self.trades)
-        
+
         streak = 0
         streak_type = "neutral"
         for pnl in reversed(self.trades):
@@ -208,14 +208,14 @@ class SessionTracker:
                 streak_type = "loss"
             else:
                 break
-        
+
         streak_str = f"{streak} {'WINS' if streak_type == 'win' else 'LOSSES'} in a row"
-        
+
         wins_list = [p for p in self.trades if p >= 0]
         losses_list = [p for p in self.trades if p < 0]
         avg_win = statistics.mean(wins_list) if wins_list else 0
         avg_loss = statistics.mean(losses_list) if losses_list else 0
-        
+
         if streak_type == "loss" and streak >= 2:
             rec = "LOSING STREAK — Raise confidence threshold, be more selective"
         elif streak_type == "win" and streak >= 2:
@@ -226,7 +226,7 @@ class SessionTracker:
             rec = "HIGH WIN RATE — Strategy is working, maintain discipline"
         else:
             rec = "MIXED RESULTS — Stick to high-confidence setups only"
-        
+
         return {
             "total_trades": total,
             "win_rate": f"{win_rate:.0f}%",
@@ -255,8 +255,8 @@ class RSIAnalyzer:
         if len(history) < RSIAnalyzer.MIN_HISTORY:
             return {"rsi": 50.0, "signal": "NEUTRAL", "verdict": f"Warming up ({len(history)}/{RSIAnalyzer.MIN_HISTORY} ticks)"}
 
-        # Use last PERIOD+1 prices for the core calc, but seed with smoothed avg from longer window
-        prices = list(history)[-RSIAnalyzer.PERIOD - 1:]
+        # Use full available window for stable Wilder smoothing
+        prices = list(history)[-RSIAnalyzer.MIN_HISTORY:]
         gains, losses = [], []
         for i in range(1, len(prices)):
             delta = prices[i] - prices[i - 1]
@@ -267,8 +267,13 @@ class RSIAnalyzer:
                 gains.append(0)
                 losses.append(abs(delta))
 
-        avg_gain = statistics.mean(gains) if gains else 0
-        avg_loss = statistics.mean(losses) if losses else 0
+        # Wilder's exponential smoothing: seed with SMA then iterate
+        period = RSIAnalyzer.PERIOD
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for j in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[j]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[j]) / period
 
         if avg_loss == 0 and avg_gain == 0:
             rsi = 50.0  # No movement at all
@@ -521,7 +526,7 @@ class CandlePatterns:
     """
     Detects high-probability short-term reversal candlestick patterns
     using recent price ticks as pseudo-candles.
-    
+
     Detects: Hammer, Shooting Star, Bullish/Bearish Engulfing, Doji.
     Each pattern has a known directional bias used by professional traders.
     """
@@ -668,9 +673,13 @@ class EMACross:
 
     @staticmethod
     def _ema(prices: list, period: int) -> list:
+        """EMA seeded with SMA of first `period` prices for unbiased start."""
+        if len(prices) < period:
+            return prices[:]
         k = 2 / (period + 1)
-        ema = [prices[0]]
-        for p in prices[1:]:
+        sma_seed = sum(prices[:period]) / period
+        ema = [sma_seed]
+        for p in prices[period:]:
             ema.append(p * k + ema[-1] * (1 - k))
         return ema
 
@@ -711,13 +720,16 @@ class EMACross:
 
 class VolumeMomentum:
     """
-    Detects volume spikes combined with price direction to confirm conviction.
+    Price-range momentum proxy — uses price acceleration as a conviction signal
+    when real volume data is unavailable.
+
     Uses bid/ask spread change as proxy for volume since CoinDCX ticker provides bid/ask.
     A tightening spread + upward price = buying pressure.
     Widening spread + downward price = selling panic.
-    Uses price acceleration as the momentum proxy when volume is unavailable.
+
+    NOTE: This is a price-range heuristic, not actual volume analysis.
     """
-    name = "Volume Momentum"
+    name = "Price Range Momentum"
     MIN_HISTORY = 20
 
     @staticmethod
@@ -781,12 +793,12 @@ class MarketRegimeDetector:
 
     @staticmethod
     def _ema(prices: list, period: int) -> float:
-        """Exponential moving average (simplified Wilder method)."""
+        """Exponential moving average seeded with SMA for unbiased start."""
         if len(prices) < period:
             return prices[-1] if prices else 0.0
         k = 2 / (period + 1)
-        ema = prices[0]
-        for p in prices[1:]:
+        ema = sum(prices[:period]) / period
+        for p in prices[period:]:
             ema = p * k + ema * (1 - k)
         return ema
 
@@ -823,7 +835,7 @@ class MarketRegimeDetector:
         if efficiency < config.CHOPPY_EFFICIENCY_THRESHOLD:
             regime = "CHOPPY"
             verdict = f"CHOPPY — Market oscillating ({efficiency:.2%} efficiency). Trade only high-conviction setups."
-            direction = "NONE"
+            direction = "ANY"  # Let downstream choppy-override gate decide, not a hard block
         elif bull_signals >= 2:
             regime = "BULL"
             verdict = f"BULL — EMA20({ema20:,.0f}) > EMA50({ema50:,.0f}). Take LONG only. Strength: {efficiency:.2%}"
@@ -850,6 +862,9 @@ class MarketRegimeDetector:
 class ATRTracker:
     """
     Average True Range (ATR-14) — measures how much price moves per tick.
+
+    Uses inter-tick price change as TR approximation (tick data has no OHLC).
+    On tick data: TR_i = |price[i] - price[i-1]| (close-to-close).
 
     Uses ATR to dynamically size stop-loss and take-profit:
       - Stop-Loss  = entry ± (ATR × SL_MULT)

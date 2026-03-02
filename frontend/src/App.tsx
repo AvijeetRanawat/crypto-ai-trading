@@ -8,7 +8,7 @@ import { useResizableLogs } from "./hooks/useResizableLogs";
 import { useResizablePanel } from "./hooks/useResizablePanel";
 import { useTheme } from "./hooks/useTheme";
 import { formatUptime } from "./utils/format";
-import { STORAGE_KEYS, SYMBOLS_BY_TRADING_MODE, TRADING_MODES, type TradingMode } from "./utils/constants";
+import { STARTING_BALANCE, STORAGE_KEYS, SYMBOLS_BY_TRADING_MODE, TRADING_MODES, type TradingMode } from "./utils/constants";
 
 function App() {
   const [tradingMode, setTradingMode] = useState<TradingMode>(() => {
@@ -55,7 +55,7 @@ function App() {
     }
   }, [symbolOptions, selectedSymbol]);
 
-  const balance = useMemo(() => 1250 + Number(summary.total_pnl || 0), [summary.total_pnl]);
+  const balance = useMemo(() => STARTING_BALANCE + Number(summary.total_pnl || 0), [summary.total_pnl]);
   const uptime = useMemo(() => formatUptime(startTimeMs, nowMs), [startTimeMs, nowMs]);
   const latestSignal = useMemo(() => (signals.length ? signals[signals.length - 1] : null), [signals]);
 

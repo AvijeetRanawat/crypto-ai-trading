@@ -54,15 +54,15 @@ class TradingEngine:
         self.runtime_ctx = get_runtime_context()
         self.allowed_symbols = set(config.BLUE_CHIP_WHITELIST)
         self.client.monitored_channels = list(self.allowed_symbols)
-        
+
         history_size = int((config.MOMENTUM_WINDOW_MINS * 60) / config.POLL_INTERVAL_SECONDS)
         self.price_history = {symbol: deque(maxlen=history_size) for symbol in self.allowed_symbols}
-        
+
         # Algorithmic tools
         self.algo_agents = [MomentumAgent(), SwingAgent()]
         self.trend_filter = TrendAgent()
         self.session_tracker = SessionTracker()
-        
+
         # LLM agents
         self.llm_agent = None
         self.retro_agent = None
@@ -71,22 +71,13 @@ class TradingEngine:
         try:
             self.llm_agent = LLMAgent()
             if self.llm_agent and self.llm_agent.ready:
-                if self.llm_agent.provider == "BEDROCK" and self.llm_agent.bedrock:
-                    if config.ENABLE_RETROSPECTIVE:
-                        self.retro_agent = RetrospectiveAgent(self.llm_agent.bedrock)
-                    if config.ENABLE_META_OPTIMIZER:
-                        self.meta_optimizer = MetaOptimizer(self.llm_agent.bedrock)
-                    if config.ENABLE_MISSED_OPPORTUNITY_ANALYZER:
-                        self.missed_analyzer = MissedOpportunityAnalyzer(self.llm_agent.bedrock, config.BEDROCK_MODEL_ID)
-                elif (
-                    config.ENABLE_RETROSPECTIVE
-                    or config.ENABLE_META_OPTIMIZER
-                    or config.ENABLE_MISSED_OPPORTUNITY_ANALYZER
-                ):
-                    logger.warning(
-                        "Retrospective/meta/missed-opportunity analyzers are Bedrock-only and were skipped "
-                        f"for provider={self.llm_agent.provider}."
-                    )
+                bedrock_client = getattr(self.llm_agent, 'bedrock', None)
+                if config.ENABLE_RETROSPECTIVE:
+                    self.retro_agent = RetrospectiveAgent(bedrock_client)
+                if config.ENABLE_META_OPTIMIZER:
+                    self.meta_optimizer = MetaOptimizer(bedrock_client)
+                if config.ENABLE_MISSED_OPPORTUNITY_ANALYZER:
+                    self.missed_analyzer = MissedOpportunityAnalyzer(bedrock_client, config.BEDROCK_MODEL_ID)
                 logger.info(f"✅ Engine initialized with LLM provider={self.llm_agent.provider} (profit-first mode)")
             else:
                 logger.error("LLM provider initialization failed.")
@@ -101,13 +92,13 @@ class TradingEngine:
         self.trades_closed_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
         self.rl_updates_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
         self.rl_trade_rewards_by_mode: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
-        self.last_llm_call = None
+        self.last_llm_call: dict[str, datetime | None] = {}  # per-mode LLM throttle
         self.missed_opportunities_count = 0
         self.last_entry_prices: dict = {}      # key(symbol:mode) -> (price, side, timestamp)
         self.direction_block: dict = {}         # key(symbol:mode) -> {side, blocked_until}
         self.last_close_time_by_mode: dict[str, datetime] = {}
         self.symbol_drift_alerted = set()
-        self.consecutive_losses = 0
+        self.consecutive_losses: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
         self.trading_halted_reason = None
         self.session_start_balance = self.simulator.balance_usdt
         self.parallel_products = list(config.PARALLEL_PRODUCTS)
@@ -136,7 +127,7 @@ class TradingEngine:
             max_workers=max(1, len(self.parallel_products)),
             thread_name_prefix="policy-worker",
         )
-        
+
         logger.info(f"Engine ready. Watching: {sorted(self.allowed_symbols)}")
         logger.info(f"  Product: {config.TRADING_PRODUCT}")
         logger.info(
@@ -186,19 +177,6 @@ class TradingEngine:
             "under_sampled": under_sampled,
             "force_entry": force_entry,
         }
-        logger.info(f"  Stop-Loss: -{config.EARLY_STOP_LOSS_PCT*100:.2f}%  |  TP: +{config.TAKE_PROFIT_PCT*100:.2f}%  |  Trailing: +{config.TRAILING_STOP_TRIGGER_PCT*100:.2f}%")
-        logger.info(f"  Position: ${config.MAX_POSITION_SIZE_USDT:,.0f}  |  LLM Throttle: {config.LLM_POLL_INTERVAL_SECONDS}s  |  Max Hold: {config.MANDATORY_EXIT_SECONDS}s")
-        logger.info(
-            f"  LLM budget/day: ${config.LLM_DAILY_BUDGET_USD:.2f} | "
-            f"LLM max calls/hour: {config.LLM_MAX_CALLS_PER_HOUR} | "
-            f"Max drawdown: ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
-        )
-        logger.info(
-            "  RL weight agent: enabled=%s eps=%.3f lr=%.3f",
-            bool(config.ENABLE_RL_WEIGHT_AGENT),
-            float(config.RL_EPSILON),
-            float(config.RL_LEARNING_RATE),
-        )
 
     def _count_pro_signals(self, rsi_result, macd_result, bb_result, sr_result, candle_result,
                             stochrsi_result=None, ema_result=None, volmom_result=None) -> tuple:
@@ -443,13 +421,19 @@ class TradingEngine:
             if article_count < config.SENTIMENT_MIN_ARTICLES:
                 return True, f"Sentiment thin ({article_count} articles)"
 
+            # Neutral / undecided sentiment should not block trades —
+            # only STRONG directional conflict should hard-block.
             if abs(score) < min_abs_score:
-                return False, f"Sentiment weak ({score:+.2f}; gate x{gate_mult:.2f})"
+                return True, f"Sentiment neutral ({score:+.2f}; gate x{gate_mult:.2f})"
 
-            if proposed_dir == "LONG" and score < directional_floor:
+            # Block only when sentiment STRONGLY opposes the direction.
+            # (Previous logic required positive sentiment for LONG which
+            #  blocked all entries during "Extreme Fear" periods even when
+            #  TA signals were strong.)
+            if proposed_dir == "LONG" and score < -directional_floor:
                 return False, f"Sentiment opposes LONG ({label} {score:+.2f}; gate x{gate_mult:.2f})"
 
-            if proposed_dir == "SHORT" and score > -directional_floor:
+            if proposed_dir == "SHORT" and score > directional_floor:
                 return False, f"Sentiment opposes SHORT ({label} {score:+.2f}; gate x{gate_mult:.2f})"
 
             return True, f"Sentiment supports {proposed_dir} ({label} {score:+.2f}; gate x{gate_mult:.2f})"
@@ -472,9 +456,13 @@ class TradingEngine:
         agreement = max(buy_count, sell_count)
         disagreement = min(buy_count, sell_count)
         quality = max(0.0, (agreement - disagreement) / max(total_weight, 1.0))
-        expected_move_pct = (tp_pct * 100) * max(0.5, quality + 0.3)
-        risk_drag_pct = (sl_pct * 100) * (1.0 - quality)
-        return expected_move_pct - risk_drag_pct - config.FEE_SLIPPAGE_BUFFER_PCT
+        # Win probability scales with signal quality: 50% base + 30% from quality
+        win_prob = min(0.85, 0.50 + quality * 0.30)
+        tp_pct_val = tp_pct * 100  # convert fraction to percentage
+        sl_pct_val = sl_pct * 100
+        fee_pct = config.FEE_SLIPPAGE_BUFFER_PCT
+        # Expected value = P(win) × TP - P(loss) × SL - fees
+        return (win_prob * tp_pct_val) - ((1.0 - win_prob) * sl_pct_val) - fee_pct
 
     def _deterministic_decision(self, buy_count: float, sell_count: float, total_weight: float = 8.0) -> tuple:
         agreement = max(buy_count, sell_count)
@@ -712,8 +700,9 @@ class TradingEngine:
         if session_quality == "LOW":
             penalties["off_hours"] = config.FUTURES_OFF_HOURS_PENALTY
             composite_score -= config.FUTURES_OFF_HOURS_PENALTY
-        if self.consecutive_losses > 0:
-            loss_penalty = min(0.25, self.consecutive_losses * config.FUTURES_LOSS_STREAK_PENALTY)
+        _cons_losses = self.consecutive_losses.get("FUTURES", 0)
+        if _cons_losses > 0:
+            loss_penalty = min(0.25, _cons_losses * config.FUTURES_LOSS_STREAK_PENALTY)
             penalties["loss_streak"] = loss_penalty
             composite_score -= loss_penalty
         composite_score = self._clamp(composite_score)
@@ -735,14 +724,14 @@ class TradingEngine:
             rec_lev -= 1
         if confidence < config.FUTURES_MIN_CONFIDENCE + 0.07:
             rec_lev = min(rec_lev, 2)
-        if self.consecutive_losses > 0:
+        if _cons_losses > 0:
             rec_lev = min(rec_lev, 2)
         rec_lev = max(min_lev, min(max_lev, rec_lev))
 
         size_span = max(config.FUTURES_SIZE_MAX_MULT - config.FUTURES_SIZE_MIN_MULT, 0.01)
         size_multiplier = config.FUTURES_SIZE_MIN_MULT + (score_span * size_span)
         size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
-        if self.consecutive_losses >= 2:
+        if _cons_losses >= 2:
             size_multiplier *= 0.75
         size_multiplier = max(config.FUTURES_SIZE_MIN_MULT, min(config.FUTURES_SIZE_MAX_MULT, size_multiplier))
 
@@ -1016,8 +1005,9 @@ class TradingEngine:
         if session_quality == "LOW":
             penalties["off_hours"] = config.OPTIONS_OFF_HOURS_PENALTY
             composite_score -= config.OPTIONS_OFF_HOURS_PENALTY
-        if self.consecutive_losses > 0:
-            loss_penalty = min(0.30, self.consecutive_losses * config.OPTIONS_LOSS_STREAK_PENALTY)
+        _cons_losses = self.consecutive_losses.get("OPTIONS", 0)
+        if _cons_losses > 0:
+            loss_penalty = min(0.30, _cons_losses * config.OPTIONS_LOSS_STREAK_PENALTY)
             penalties["loss_streak"] = loss_penalty
             composite_score -= loss_penalty
         composite_score = self._clamp(composite_score)
@@ -1031,7 +1021,7 @@ class TradingEngine:
         size_span = max(config.OPTIONS_SIZE_MAX_MULT - config.OPTIONS_SIZE_MIN_MULT, 0.01)
         size_multiplier = config.OPTIONS_SIZE_MIN_MULT + (score_span * size_span)
         size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
-        if self.consecutive_losses >= 2:
+        if _cons_losses >= 2:
             size_multiplier *= 0.75
         size_multiplier = max(config.OPTIONS_SIZE_MIN_MULT, min(config.OPTIONS_SIZE_MAX_MULT, size_multiplier))
 
@@ -1253,7 +1243,8 @@ class TradingEngine:
                 win_rate_score = self._clamp(0.5 + ((float(wr_text[:-1]) - 50.0) / 100.0))
             except Exception:
                 win_rate_score = 0.50
-        performance_score = self._clamp(win_rate_score - (self.consecutive_losses * 0.12))
+        _cons_losses = self.consecutive_losses.get("SPOT", 0)
+        performance_score = self._clamp(win_rate_score - (_cons_losses * 0.12))
         rl_inf = self._rl_infer(
             mode="SPOT",
             regime=regime,
@@ -1280,22 +1271,14 @@ class TradingEngine:
             strategy_fit = 0.68
             strategy_note = "Bear regime contrarian scalp (small size)"
         elif regime == "CHOPPY":
-            strategy = "SPOT_SKIP_CHOP"
-            strategy_fit = 0.34
-            strategy_note = "Choppy regime"
-
-        if strategy == "SPOT_SKIP_CHOP":
-            return {
-                "allow": False,
-                "composite_score": 0.0,
-                "recommended_leverage": 1,
-                "recommended_strategy": strategy,
-                "size_multiplier": config.SPOT_SIZE_MIN_MULT,
-                "verdict": f"Spot reject: {strategy_note}",
-                "component_scores": {},
-                "penalties": {},
-                "hard_reject_reason": "choppy_regime",
-            }
+            if vote_imbalance >= 0.35 and momentum_score >= 0.55:
+                strategy = "SPOT_CHOPPY_BREAKOUT"
+                strategy_fit = 0.58
+                strategy_note = "Choppy with strong directional conviction"
+            else:
+                strategy = "SPOT_CHOPPY_CAUTIOUS"
+                strategy_fit = 0.40
+                strategy_note = "Choppy regime — reduced size"
 
         weights = {
             "trend": max(0.0, float(config.SPOT_WEIGHT_TREND)),
@@ -1326,10 +1309,14 @@ class TradingEngine:
         if session_quality == "LOW":
             penalties["off_hours"] = config.SPOT_OFF_HOURS_PENALTY
             composite_score -= config.SPOT_OFF_HOURS_PENALTY
-        if self.consecutive_losses > 0:
-            loss_penalty = min(0.20, self.consecutive_losses * config.SPOT_LOSS_STREAK_PENALTY)
+        if _cons_losses > 0:
+            loss_penalty = min(0.20, _cons_losses * config.SPOT_LOSS_STREAK_PENALTY)
             penalties["loss_streak"] = loss_penalty
             composite_score -= loss_penalty
+        if strategy in ("SPOT_CHOPPY_CAUTIOUS", "SPOT_CHOPPY_BREAKOUT"):
+            choppy_penalty = 0.05 if strategy == "SPOT_CHOPPY_CAUTIOUS" else 0.02
+            penalties["choppy_regime"] = choppy_penalty
+            composite_score -= choppy_penalty
         composite_score = self._clamp(composite_score)
 
         conf_gate = confidence >= config.SPOT_MIN_CONFIDENCE if enforce_confidence_gate else True
@@ -1343,7 +1330,11 @@ class TradingEngine:
         size_multiplier *= float(rl_inf.get("size_mult", 1.0) or 1.0)
         if strategy == "SPOT_MEAN_REVERSION_SCALP":
             size_multiplier = min(size_multiplier, 0.80)
-        if self.consecutive_losses >= 2:
+        if strategy == "SPOT_CHOPPY_CAUTIOUS":
+            size_multiplier = min(size_multiplier, 0.65)
+        elif strategy == "SPOT_CHOPPY_BREAKOUT":
+            size_multiplier = min(size_multiplier, 0.85)
+        if _cons_losses >= 2:
             size_multiplier *= 0.75
         size_multiplier = max(config.SPOT_SIZE_MIN_MULT, min(config.SPOT_SIZE_MAX_MULT, size_multiplier))
 
@@ -1387,6 +1378,8 @@ class TradingEngine:
 
     def _product_policy_decision(self, mode: str = None, total_vote_weight: float = 8.0, **kwargs) -> dict:
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
+        # 'stage' is consumed by the caller for logging, not by policy methods
+        kwargs.pop("stage", None)
         if active_mode == "FUTURES":
             return self._futures_policy_decision(mode=active_mode, total_vote_weight=total_vote_weight, **kwargs)
         if active_mode == "OPTIONS":
@@ -1502,8 +1495,9 @@ class TradingEngine:
             results[mode] = result
         return results
 
-    def _check_kill_switch(self) -> tuple:
-        drawdown = max(0.0, self.session_start_balance - self.simulator.balance_usdt)
+    def _check_kill_switch(self, latest_prices: dict | None = None) -> tuple:
+        equity = self.simulator.total_equity(latest_prices)
+        drawdown = max(0.0, self.session_start_balance - equity)
         if drawdown >= config.MAX_DAILY_DRAWDOWN_USD:
             return True, f"Kill-switch: drawdown ${drawdown:.2f} >= ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
 
@@ -1511,8 +1505,9 @@ class TradingEngine:
         if spend_today >= config.LLM_DAILY_BUDGET_USD:
             return True, f"Kill-switch: LLM budget exceeded (${spend_today:.2f})"
 
-        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
-            return True, f"Kill-switch: consecutive losses {self.consecutive_losses}"
+        max_cons = max(self.consecutive_losses.get(m, 0) for m in ("SPOT", "FUTURES", "OPTIONS"))
+        if max_cons >= config.MAX_CONSECUTIVE_LOSSES:
+            return True, f"Kill-switch: consecutive losses {max_cons}"
 
         return False, ""
 
@@ -1536,7 +1531,7 @@ class TradingEngine:
 
             # ── Direction block: if this is a loss, track consecutive losses per direction ──
             if trade_result["pnl"] <= 0:
-                self.consecutive_losses += 1
+                self.consecutive_losses[active_mode] = self.consecutive_losses.get(active_mode, 0) + 1
                 side = trade_result["side"]
                 block_key = f"{pos_key}_{side}"
                 self._loss_streak = getattr(self, '_loss_streak', {})
@@ -1547,7 +1542,7 @@ class TradingEngine:
                     logger.warning(f"🚫 DIRECTION BLOCK: {side} on {symbol} for 10 min after {self._loss_streak[block_key]} consecutive losses")
                     self._loss_streak[block_key] = 0  # reset after block
             else:
-                self.consecutive_losses = 0
+                self.consecutive_losses[active_mode] = 0
                 # Win — reset the loss streak for this symbol's direction
                 side = trade_result["side"]
                 block_key = f"{pos_key}_{side}"
@@ -1700,7 +1695,7 @@ class TradingEngine:
                         min_closed_trades=config.MIN_NEW_CLOSED_TRADES_FOR_REVIEW,
                     )
                     last_reviewed_trade_id = new_id
-                    
+
                     # Re-distill only when explicitly enabled and enough new closed trades.
                     if config.ENABLE_DISTILLATION:
                         from distill_lessons import distill_all
@@ -1708,7 +1703,7 @@ class TradingEngine:
                             since_trade_id=prev_reviewed_trade_id,
                             min_new_closed_trades=config.MIN_NEW_CLOSED_TRADES_FOR_DISTILLATION,
                         )
-                    
+
                 except Exception as e:
                     logger.error(f"Post-review improvement failed: {e}", exc_info=True)
 
@@ -1744,7 +1739,7 @@ class TradingEngine:
             update_intent(message, targets, mode=active_mode)
         logger.info(f"Starting Session ({config.MAX_TRADES_RUN} trades max) mode={active_mode}...")
         primary_symbol = sorted(self.allowed_symbols)[0]
-        
+
         # ── Warmup: fetch historical klines to reduce startup wait ──
         for symbol in sorted(self.allowed_symbols):
             klines = self.client.get_historical_klines(symbol, interval='1m', limit=60)
@@ -1776,7 +1771,7 @@ class TradingEngine:
 
                 prices = self.client.latest_prices
 
-                kill, reason = self._check_kill_switch()
+                kill, reason = self._check_kill_switch(prices)
                 if kill and not self.trading_halted_reason:
                     self.trading_halted_reason = reason
                     logger.error(reason)
@@ -1791,7 +1786,7 @@ class TradingEngine:
                         continue
 
                     current_price = prices[symbol]
-                    hold_secs = (datetime.now() - pos["entry_time"]).seconds
+                    hold_secs = int((datetime.now() - pos["entry_time"]).total_seconds())
                     entry = pos["entry_price"]
 
                     if pos["side"] == "LONG":
@@ -1893,16 +1888,28 @@ class TradingEngine:
                     )
 
                 # ── 2. Enter new positions ────────────────────────────────────
-                if len(self._positions_for_mode(active_mode)) == 0 and self.trades_closed < config.MAX_TRADES_RUN:
+                open_positions = self._positions_for_mode(active_mode)
+                if len(open_positions) < config.MAX_POSITIONS and self.trades_closed < config.MAX_TRADES_RUN:
                     if self.trading_halted_reason:
                         intent(f"🛑 Trading halted: {self.trading_halted_reason}", [])
                         break
 
+                    # Symbols that already have an open position in this mode
+                    symbols_with_positions = {v["symbol"] for v in open_positions.values()}
+
                     for symbol in sorted(self.allowed_symbols):
+                        # Stop scanning if we've filled all slots this cycle
+                        if len(self._positions_for_mode(active_mode)) >= config.MAX_POSITIONS:
+                            break
+
+                        # Skip symbols that already have an open position in this mode
+                        if symbol in symbols_with_positions:
+                            continue
+
                         current_price = prices.get(symbol, 0)
                         history = list(self.price_history[symbol])
                         meta = self.client.ticker_meta.get(symbol, {})
-                        
+
                         if current_price <= 0 or len(history) < min_ticks:
                             continue
 
@@ -2125,11 +2132,27 @@ class TradingEngine:
                                 continue
 
                         # ── v6: MARKET REGIME FILTER ───────────────────────
+                        # Use dynamic ATR-based TP/SL when available for a more
+                        # realistic edge estimate; fall back to config defaults.
+                        # IMPORTANT: Use max(config, ATR) — ATR on 1-min tick
+                        # data yields tiny values that get floor-clamped; when
+                        # those floor values are smaller than config targets the
+                        # fee term dominates and edges go permanently negative.
+                        _bl_tp = config.TAKE_PROFIT_PCT
+                        _bl_sl = config.EARLY_STOP_LOSS_PCT
+                        _bl_atr = self._safe_tool_call(
+                            "ATRTracker_baseline",
+                            lambda: ATRTracker.analyze(history),
+                            None,
+                        )
+                        if _bl_atr and _bl_atr.get("take_profit_pct"):
+                            _bl_tp = max(_bl_tp, _bl_atr["take_profit_pct"])
+                            _bl_sl = max(_bl_sl, _bl_atr["stop_loss_pct"])
                         baseline_edge_pct = self._estimate_expected_edge_pct(
                             buy_count,
                             sell_count,
-                            config.TAKE_PROFIT_PCT,
-                            config.EARLY_STOP_LOSS_PCT,
+                            _bl_tp,
+                            _bl_sl,
                             total_vote_weight,
                         )
 
@@ -2184,7 +2207,17 @@ class TradingEngine:
                             )
 
                         if allowed_dir not in ("ANY", proposed_dir):
-                            if force_entry and baseline_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
+                            if (
+                                skip_pressure > 0
+                                and baseline_edge_pct >= float(rl_cfg("RL_SKIP_PRESSURE_EDGE_MIN"))
+                                and max(buy_count, sell_count) >= dir_threshold
+                            ):
+                                intent(
+                                    f"⚡ Skip-pressure override: bypassing regime mismatch "
+                                    f"({skip_pressure:.2f}, {regime}) for learning.",
+                                    [symbol],
+                                )
+                            elif force_entry and baseline_edge_pct >= float(rl_cfg("RL_FORCE_ENTRY_MIN_EDGE_PCT")):
                                 intent(
                                     f"⚡ Exploration override [{active_mode}]: bypassing regime mismatch ({regime}).",
                                     [symbol],
@@ -2304,8 +2337,12 @@ class TradingEngine:
                             lambda: ATRTracker.analyze(history),
                             {"stop_loss_pct": config.EARLY_STOP_LOSS_PCT, "take_profit_pct": config.TAKE_PROFIT_PCT, "verdict": "Tool error"},
                         )
-                        dynamic_sl  = atr_result["stop_loss_pct"]
-                        dynamic_tp  = atr_result["take_profit_pct"]
+                        # Use max(config, ATR) — ATR on 1-min tick data
+                        # often floor-clamps to tiny values that make fees
+                        # dominate the edge formula.  Config values represent
+                        # the actual trading-horizon targets.
+                        dynamic_sl  = max(config.EARLY_STOP_LOSS_PCT, atr_result["stop_loss_pct"])
+                        dynamic_tp  = max(config.TAKE_PROFIT_PCT, atr_result["take_profit_pct"])
 
                         # ── v6: MULTI-TIMEFRAME CONFIRMATION ───────────────
                         mtf_result = self._safe_tool_call(
@@ -2641,33 +2678,39 @@ class TradingEngine:
                         )
                         self._log_product_eval(symbol, "pre-llm", pre_policy, mode=active_mode)
                         if not bool((pre_policy or {}).get("allow")):
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            self._rl_reward_skip_opportunity(
-                                active_mode,
-                                pre_policy,
-                                expected_edge_pct=expected_edge_pct,
-                                reason="pre_policy_reject",
-                                symbol=symbol,
-                            )
-                            intent(f"🚫 [{active_mode}] {pre_policy.get('verdict', 'Rejected')}", [symbol])
-                            reject_source = f"{active_mode}_REJECT"
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, reject_source),
-                                deterministic_action=deterministic_dir,
-                                deterministic_conf=det_conf,
-                            )
-                            continue
+                            if force_entry:
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: bypassing pre-policy reject (score={pre_policy.get('composite_score', 0):.3f}) for sample collection.",
+                                    [symbol],
+                                )
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                self._rl_reward_skip_opportunity(
+                                    active_mode,
+                                    pre_policy,
+                                    expected_edge_pct=expected_edge_pct,
+                                    reason="pre_policy_reject",
+                                    symbol=symbol,
+                                )
+                                intent(f"🚫 [{active_mode}] {pre_policy.get('verdict', 'Rejected')}", [symbol])
+                                reject_source = f"{active_mode}_REJECT"
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, reject_source),
+                                    deterministic_action=deterministic_dir,
+                                    deterministic_conf=det_conf,
+                                )
+                                continue
 
                         llm_signal = None
                         llm_cost = 0.0
@@ -2678,6 +2721,11 @@ class TradingEngine:
                         final_reason = f"Deterministic: {det_reason}"
 
                         borderline_setup = det_conf < 0.75 or max(buy_count, sell_count) <= (4.0 * (total_vote_weight / 8.0))
+                        if force_entry:
+                            # Exploration overrides skip LLM — use deterministic
+                            # signal directly to avoid LLM throttle/budget/reject
+                            # blocking forced sample collection.
+                            borderline_setup = False
                         if borderline_setup:
                             llm_ok, llm_reason = self._llm_budget_ok()
                             if not llm_ok:
@@ -2701,9 +2749,10 @@ class TradingEngine:
                                 )
                                 continue
 
-                            if self.last_llm_call and (now - self.last_llm_call).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
+                            last_llm = self.last_llm_call.get(active_mode)
+                            if last_llm and (now - last_llm).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
                                 self.skipped_cycles_by_mode[active_mode] += 1
-                                wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - self.last_llm_call).total_seconds())
+                                wait_left = int(config.LLM_POLL_INTERVAL_SECONDS - (now - last_llm).total_seconds())
                                 if self.skipped_cycles_by_mode[active_mode] % 2 == 0:
                                     intent(
                                         f"⚡ Borderline setup {proposed_dir} ({buy_count:.1f}B/{sell_count:.1f}S) | LLM in {wait_left}s...",
@@ -2747,7 +2796,7 @@ class TradingEngine:
                                 )
                                 continue
 
-                            self.last_llm_call = now
+                            self.last_llm_call[active_mode] = now
                             llm_signal = self.llm_agent.analyze_with_tools(
                                 symbol,
                                 current_price,
@@ -2767,7 +2816,7 @@ class TradingEngine:
                             llm_tokens = int(sum(ev.get("total_tokens", 0) for ev in usage_events))
 
                             effective_conf = (llm_signal.confidence if llm_signal else 0.0) * conf_multiplier
-                            confidence_floor = 0.70
+                            confidence_floor = config.LLM_CONFIDENCE_FLOOR
                             if (
                                 not llm_signal
                                 or llm_signal.action == "NEUTRAL"
@@ -2839,35 +2888,41 @@ class TradingEngine:
                         )
                         self._log_product_eval(symbol, "post-llm", post_policy, mode=active_mode)
                         if not bool((post_policy or {}).get("allow")):
-                            self.skipped_cycles_by_mode[active_mode] += 1
-                            self._rl_reward_skip_opportunity(
-                                active_mode,
-                                post_policy,
-                                expected_edge_pct=expected_edge_pct,
-                                reason="post_policy_reject",
-                                symbol=symbol,
-                            )
-                            intent(f"🚫 [{active_mode}] {post_policy.get('verdict', 'Rejected')}", [symbol])
-                            reject_source = f"{active_mode}_REJECT"
-                            save_signal_event(
-                                symbol,
-                                current_price,
-                                raw_buy_count,
-                                raw_sell_count,
-                                buy_count,
-                                sell_count,
-                                total_vote_weight,
-                                rsi_result["rsi"],
-                                macd_result["crossover"],
-                                bb_result["position_pct"],
-                                "SKIPPED",
-                                decision_source=self._mode_decision_source(active_mode, reject_source),
-                                deterministic_action=final_dir,
-                                deterministic_conf=det_conf,
-                                llm_cost_usd=llm_cost,
-                                llm_tokens=llm_tokens,
-                            )
-                            continue
+                            if force_entry:
+                                intent(
+                                    f"⚡ Exploration override [{active_mode}]: bypassing post-policy reject (score={post_policy.get('composite_score', 0):.3f}) for sample collection.",
+                                    [symbol],
+                                )
+                            else:
+                                self.skipped_cycles_by_mode[active_mode] += 1
+                                self._rl_reward_skip_opportunity(
+                                    active_mode,
+                                    post_policy,
+                                    expected_edge_pct=expected_edge_pct,
+                                    reason="post_policy_reject",
+                                    symbol=symbol,
+                                )
+                                intent(f"🚫 [{active_mode}] {post_policy.get('verdict', 'Rejected')}", [symbol])
+                                reject_source = f"{active_mode}_REJECT"
+                                save_signal_event(
+                                    symbol,
+                                    current_price,
+                                    raw_buy_count,
+                                    raw_sell_count,
+                                    buy_count,
+                                    sell_count,
+                                    total_vote_weight,
+                                    rsi_result["rsi"],
+                                    macd_result["crossover"],
+                                    bb_result["position_pct"],
+                                    "SKIPPED",
+                                    decision_source=self._mode_decision_source(active_mode, reject_source),
+                                    deterministic_action=final_dir,
+                                    deterministic_conf=det_conf,
+                                    llm_cost_usd=llm_cost,
+                                    llm_tokens=llm_tokens,
+                                )
+                                continue
                         selected_mode, policy_eval = active_mode, post_policy
 
                         # ── LLM decision review (support vs oppose) ─────────
@@ -2948,7 +3003,7 @@ class TradingEngine:
                             product_strategy = str(policy_eval.get("recommended_strategy", "N/A"))
                             pos_usdt = int(pos_usdt * float(policy_eval.get("size_multiplier", 1.0) or 1.0))
 
-                        if self.consecutive_losses >= 2:
+                        if self.consecutive_losses.get(active_mode, 0) >= 2:
                             pos_usdt = int(pos_usdt * 0.7)
                             logger.info(f"📉 Risk cut: position shrunk to ${pos_usdt:,} (loss streak)")
 
@@ -3043,7 +3098,7 @@ class TradingEngine:
                             f"🎯 Trade #{self.trades_executed}: {side} ${pos_usdt:,} | conf:{final_conf:.2f} | {decision_source_tag}{lev_label} | pool:shared",
                             [symbol],
                         )
-                        self.simulator.enter_position(
+                        entered = self.simulator.enter_position(
                             symbol,
                             current_price,
                             pos_usdt,
@@ -3055,6 +3110,10 @@ class TradingEngine:
                             llm_cost_usd=llm_cost if decision_source == "LLM_TIEBREAKER" else 0.0,
                             mode=selected_mode,
                         )
+
+                        if not entered:
+                            logger.warning("Entry failed for %s (%s) — skipping signal event save", symbol, selected_mode)
+                            continue
 
                         if pos_key in self.simulator.positions:
                             self.simulator.positions[pos_key]["dynamic_sl"] = dynamic_sl
@@ -3089,8 +3148,9 @@ class TradingEngine:
                             llm_cost_usd=llm_cost,
                             llm_tokens=llm_tokens,
                         )
-                        break
-                        
+                        symbols_with_positions.add(symbol)
+                        continue  # keep scanning other symbols for entries
+
             except Exception as e:
                 logger.error(f"Engine error: {e}", exc_info=True)
 
@@ -3100,7 +3160,7 @@ class TradingEngine:
         logger.info(f"🏁 Session Complete! {self.trades_closed} trades.")
         logger.info(f"💰 Net PnL: ${self.total_session_pnl:,.2f}")
         logger.info(f"💼 Final Balance: ${self.simulator.balance_usdt:,.2f}")
-        
+
         # ── 1. Meta-Optimizer (synthesises golden rules from lessons) ──
         if self.meta_optimizer and config.ENABLE_META_OPTIMIZER:
             try:
@@ -3117,6 +3177,6 @@ class TradingEngine:
                 run_review()
             except Exception as e:
                 logger.error(f"Session post-mortem error: {e}")
-        
+
         update_intent(f"Done. {self.trades_closed} trades. PnL: ${self.total_session_pnl:,.2f}. Run 'python3 reset_session.py' to start fresh.", [])
-        sys.exit(0)
+        logger.info("Engine run complete for mode=%s. Returning control to supervisor.", active_mode)

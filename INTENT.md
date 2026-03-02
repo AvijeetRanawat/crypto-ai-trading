@@ -8,8 +8,8 @@ This application is a **simulation-first crypto trading system** designed to:
 2. Combine deterministic technical logic with optional LLM tie-breaking.
 3. Allocate capital across **SPOT**, **FUTURES**, and **OPTIONS** policy tracks.
 4. Run those three modes **concurrently**, sharing the same balance but maintaining separate policy/intent state.
-4. Continuously adapt policy weighting with an online RL layer.
-5. Maximize long-run risk-adjusted profitability while preserving configurable safety rails.
+5. Continuously adapt policy weighting with an online RL layer.
+6. Maximize long-run risk-adjusted profitability while preserving configurable safety rails.
 
 The system is intentionally opinionated toward rapid iteration: clear logs, session-scoped analytics, persistent learning artifacts, and explicit decision reasons.
 
@@ -22,7 +22,7 @@ The system is intentionally opinionated toward rapid iteration: clear logs, sess
 - Exchange support:
   - `COINDCX`
   - `BINANCE` (`https://api.binance.us`)
-- Polling-based market feed updates:
+- Polling-based market feed via `poll_prices()`:
   - Configurable by `POLL_INTERVAL_SECONDS`
 - Maintains:
   - `latest_prices` in-memory
@@ -35,11 +35,20 @@ The system is intentionally opinionated toward rapid iteration: clear logs, sess
 - Uses a minimum warmup history (`WARMUP_MIN_TICKS`) before decisions.
 - Runs **three concurrent loops** (SPOT/FUTURES/OPTIONS) against a shared simulator.
 - Evaluates one-symbol-at-a-time opportunities **per mode** when that mode has no open position.
+- Starting balance is configurable via `STARTING_BALANCE_USDT` (default 1250).
 - Manages open trades with:
   - dynamic ATR stop/take-profit
-  - trailing stop activation
+  - trailing stop activation (preserved across pyramid adds)
   - time exits
-  - optional pyramiding
+  - optional pyramiding (preserves trailing stop and peak PnL state)
+- Trade PnL accounting:
+  - FUTURES PnL applies position leverage multiplier
+  - Fee/slippage buffer deducted from gross PnL (`FEE_SLIPPAGE_BUFFER_PCT`)
+- Per-mode state tracking:
+  - `consecutive_losses` tracked independently per mode (not global)
+  - `last_llm_call` throttled independently per mode
+- Engine loop exits gracefully (returns control to supervisor) rather than hard-exiting the process.
+- Position entry return value is checked — failure to enter is handled without crashing.
 
 ## 3) Three Product Policies (Parallel)
 
@@ -65,12 +74,37 @@ Mode-specific decisions are tagged with `SPOT_`, `FUTURES_`, or `OPTIONS_` prefi
 - LLM is used mostly for borderline setups (tie-breaker role).
 - Optional LLM decision review can SUPPORT/OPPOSE a final action and suggest overrides.
 - Provider support:
-  - Bedrock
-  - OpenAI
+  - **Bedrock** (Claude via AWS)
+  - **OpenAI** (configurable base URL and model)
+- All LLM-consuming modules support both providers uniformly:
+  - `strategies/llm.py` (tie-breaker)
+  - `strategies/meta_optimizer.py` (golden rules distillation)
+  - `strategies/retrospective.py` (session lessons)
+  - `strategies/missed_opportunity_analyzer.py` (skip analysis)
+  - `session_review.py` (post-session review)
+  - `news_sentiment.py` (headline summarization)
+- LLM response cache:
+  - TTL-based eviction (`_CACHE_TTL_SECONDS`)
+  - Size-capped at `_CACHE_MAX_SIZE` entries with LRU-style pruning
 - LLM usage and cost are persisted (`llm_usage`) and visualized in dashboard.
-- News sentiment summarization also goes through LLM provider layer.
 
-## 5) Dashboard + API
+## 5) Technical Indicators
+
+The deterministic voter system uses 8+ tool classes, each casting BUY/SELL votes:
+
+- **RSI**: Uses Wilder's exponential smoothing (SMA seed, then iterative decay)
+- **StochRSI**: Same Wilder-smoothed RSI series as input
+- **MACD**: Standard EMA difference with signal line
+- **Bollinger Band**: %B position for mean-reversion signals
+- **EMA Cross**: SMA-seeded exponential moving averages for crossover detection
+- **Price Range Momentum** (formerly VolumeMomentum): Tick-data price range analysis
+- **Order Book Pressure**: Bid/ask imbalance scoring
+- **Market Regime Detector**: SMA-seeded EMA for regime classification (TRENDING_UP/DOWN/RANGING)
+- **ATR Scanner**: Tick-data approximation of Average True Range for volatility-aware sizing
+
+Signal confidence can be unclamped (no ceiling) for trend-strategy multipliers via `allow_unclamped=True`.
+
+## 6) Dashboard + API
 
 - FastAPI backend serves:
   - runtime stats
@@ -79,6 +113,9 @@ Mode-specific decisions are tagged with `SPOT_`, `FUTURES_`, or `OPTIONS_` prefi
   - logs
   - model token/cost breakdown
   - strategy diagnostics by mode
+- Security:
+  - `eval()` replaced with `ast.literal_eval()` for safe deserialization
+  - SQL LIKE queries use proper `ESCAPE` clause for underscore-containing mode prefixes
 - React frontend visualizes these sections and mode-specific diagnostics.
 
 ---
@@ -88,7 +125,7 @@ Mode-specific decisions are tagged with `SPOT_`, `FUTURES_`, or `OPTIONS_` prefi
 For each eligible symbol:
 
 1. Collect tool outputs:
-   - volatility, liquidity, RSI, MACD, BB, EMA cross, StochRSI, volume momentum, order book pressure, etc.
+   - volatility, liquidity, RSI, MACD, BB, EMA cross, StochRSI, price range momentum, order book pressure, etc.
 2. Build deterministic vote counts (buy vs sell), plus weighted vote totals.
 3. Apply market regime + session filters.
 4. Apply sentiment gate.
@@ -186,7 +223,7 @@ Typical behavior:
 
 ## Choppy-Market Handling
 
-Previous behavior was strict skip on choppy states.  
+Previous behavior was strict skip on choppy states.
 Current behavior allows **high-conviction choppy overrides**:
 
 - requires minimum vote imbalance and confidence thresholds
@@ -224,6 +261,31 @@ The RL layer makes the system less static by learning which weight profile works
   - minus open-trade opportunity cost penalty
   - plus skip penalties for rejected high-edge opportunities (with configurable floor/cap)
 
+## Persistent Weight Learning
+
+Strategy weight multipliers (`weight_mult` and `voter_weight_mult`) are **not**
+returned as static profile defaults.  They are **persistently learned** per
+(mode, state) and evolve over time via a profile-conditioned gradient rule:
+
+- **Storage**: `state["w"][mode][state_key]` contains the accumulated learned
+  weights (`wm`, `vm`) and a reward baseline EMA (`reward_ema`).
+- **Initialization**: first access seeds from the selected profile's defaults,
+  with all weight keys from every profile in that mode included (missing keys
+  default to 1.0).
+- **Update rule** (runs every `update()` call after n ≥ 3):
+  1. Compute normalized advantage: `(reward − baseline) / max(|baseline|, 0.002)`, clamped to [−1, 1].
+  2. Positive advantage → compute `diff = profile_target − current` (reinforce profile's bets).
+  3. Negative advantage → compute `diff = 1.0 − current` (dampen toward neutral).
+  4. Apply `learned += RL_WEIGHT_ADAPT_LR × |advantage| × diff`.
+  5. Clamp to [0.5, 2.0].
+- **Exploration noise**: 30% chance per update, adds Gaussian noise with σ that
+  decays with evidence count. This lets weights explore directions not covered
+  by any profile's proposals.
+- **Effect size**: ~0.5–1% per update (vs ~0.01% in old Q-value-only adaptation),
+  compounding over thousands of RL cycles.
+- **Tunable**: `RL_WEIGHT_ADAPT_LR` (default 0.15, range 0.01–0.5) is live-tunable
+  via the RL tuning API.
+
 ## Skip-Pressure Adaptation
 
 To avoid getting stuck in long skip streaks, the engine now adds a mode-local
@@ -245,6 +307,27 @@ And can conditionally override sentiment rejection when:
 - weighted directional support still clears threshold
 
 This keeps the system aggressive enough to keep learning while preserving edge-quality constraints.
+
+## Forced Entry (Exploration Override) Pipeline
+
+When `force_entry=True` (skip streak ≥ `RL_FORCE_ENTRY_SKIP_STREAK` and trade
+count below cap), the exploration override extends through the **entire** decision
+pipeline — not just the pre-filter gates:
+
+- ✅ Setup threshold bypass (insufficient pro-signals)
+- ✅ Directional edge bypass (low buy/sell counts)
+- ✅ Regime mismatch bypass
+- ✅ Sentiment gate bypass
+- ✅ HTF reject bypass
+- ✅ Edge reject bypass (low expected edge)
+- ✅ Pre-policy composite score bypass (score logged but not blocking)
+- ✅ LLM borderline gate bypass (uses deterministic signal directly)
+- ✅ Post-policy composite score bypass (score logged but not blocking)
+
+This guarantees that forced exploration entries actually reach the trade entry,
+producing real PnL samples for RL weight learning.  Without these downstream
+bypasses, the exploration override could log "bypassing HTF reject" but never
+trade because pre-policy or LLM gates still blocked.
 
 ## RL-Driven Sentiment Gate
 
@@ -272,6 +355,8 @@ as other RL profile parameters.
 
 - RL state is persisted at:
   - `data/rl_weights.json`
+- Saves are **batched** (every 10 updates) to reduce disk I/O, with a `flush()` method for force-saves.
+- MLX neural agent also persists epsilon state under `mlx_meta` key.
 - Survives restart and keeps learning continuity.
 - Runtime RL tuning overrides are persisted at:
   - `data/rl_tuning_overrides.json`
@@ -328,11 +413,31 @@ Risk is intentionally elevated compared to conservative defaults, but still boun
 - Max risk per trade via balance fraction
 - Min/max position size clamps
 - Futures leverage caps
-- Daily drawdown kill-switch
-- LLM budget caps and call-rate throttles
-- Consecutive-loss based risk cuts and direction blocks
+- Fee/slippage buffer deducted from every trade PnL (`FEE_SLIPPAGE_BUFFER_PCT`)
+- Daily drawdown kill-switch (uses **peak-to-trough** max drawdown, not simple range)
+- LLM budget caps and call-rate throttles (per-mode)
+- Consecutive-loss based risk cuts and direction blocks (**per-mode**, not global)
 
 This is not risk-free; it is controlled aggression.
+
+---
+
+## Database Layer
+
+- SQLite-backed persistence for trades, signals, portfolio snapshots, lessons, and LLM usage.
+- Connection management uses `_SafeConnection` wrapper with:
+  - Context manager support (`with _conn() as conn:`)
+  - `__del__` safety net to auto-close leaked connections
+  - Transparent delegation to underlying `sqlite3.Connection`
+
+---
+
+## Startup and Session Management
+
+- `run.py` supervisor manages engine lifecycle with PID tracking.
+- Session reset (`reset_session.py`) is **conditional** on `RESET_ON_RESTART` env var (default: off).
+- Reset clears trades, signals, portfolio, and logs; balance display uses `config.STARTING_BALANCE_USDT` dynamically.
+- Starting balance is configurable via environment variable, not hardcoded.
 
 ---
 
@@ -358,11 +463,19 @@ Dashboard sections expose:
 - sentiment/news summary
 - LLM token/cost usage (aggregate + model breakdown)
 - lessons learned
-- system logs
+- system logs (with smart auto-scroll and pause indicator when user scrolls up)
 - RL Agent card with expand modal and mode tabs (`SPOT`, `FUTURES`, `OPTIONS`)
   - per-profile controls: `size_mult`, `leverage_mult`, `confidence_bias`, `sentiment_gate_mult`
   - full multiplier maps: `voter_weight_mult` (8 vote parameters) and `weight_mult` (strategy factors)
   - learned RL tables per state: profile `q` and `n` counts
+  - draft protection: local edits are not overwritten by server polling until saved or reset
+
+Frontend architecture:
+
+- Balance display uses `STARTING_BALANCE` constant (synced with backend config)
+- API client logs warnings on non-OK responses and fetch failures (visible in dev tools)
+- Theme-aware scrollbar colors via CSS custom properties
+- RL modal syncs active mode with parent component and tracks dirty state
 
 RL observability APIs:
 
@@ -388,7 +501,7 @@ This is a **self-adjusting, profit-seeking, explainable trading simulator** with
 
 ## Important Caveat
 
-This system is a decision engine for simulation and experimentation.  
+This system is a decision engine for simulation and experimentation.
 It is not guaranteed to be profitable and should not be treated as financial advice.
 
 Use `TRADING_MODE=SIMULATION` until behavior is validated thoroughly against your risk tolerance.
