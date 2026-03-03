@@ -171,13 +171,13 @@ async def get_warmup(symbol: str = "BTCUSDT"):
 
 @app.get("/api/trades/recent")
 async def get_trades():
-    """Return only trades from the current session."""
+    """Return recent trades from the current session (including OPEN positions)."""
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
-        WHERE status='CLOSED' AND entry_time >= ?
+        WHERE entry_time >= ?
         AND (session_id = ? OR session_id IS NULL)
         ORDER BY id DESC LIMIT 50
     """, (SESSION_START, SESSION_ID))

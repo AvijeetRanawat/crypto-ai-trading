@@ -82,3 +82,39 @@ def test_warmup_and_regime_endpoints_use_configured_min_ticks(api_module, seed_b
     assert regime["symbol"] == "BTCUSDT"
     assert "regime" in regime
     assert "atr_verdict" in regime
+
+
+def test_recent_trades_includes_open_positions(api_module, isolated_db):
+    open_id = database.save_trade(
+        symbol="BTCUSDT",
+        side="LONG",
+        price=100000.0,
+        quantity=0.01,
+        entry_time=__import__("datetime").datetime.now(),
+        reason="open trade",
+        session_id="test-session",
+        process_id=999,
+        decision_source="SPOT_DETERMINISTIC",
+        deterministic_conf=0.8,
+    )
+    closed_id = database.save_trade(
+        symbol="ETHUSDT",
+        side="SHORT",
+        price=2500.0,
+        quantity=0.5,
+        entry_time=__import__("datetime").datetime.now(),
+        reason="closed trade",
+        session_id="test-session",
+        process_id=999,
+        decision_source="SPOT_DETERMINISTIC",
+        deterministic_conf=0.82,
+    )
+    database.update_trade_exit(closed_id, __import__("datetime").datetime.now(), 3.21)
+
+    rows = asyncio.run(api_module.get_trades())
+    row_by_id = {r["id"]: r for r in rows}
+
+    assert open_id in row_by_id
+    assert row_by_id[open_id]["status"] == "OPEN"
+    assert closed_id in row_by_id
+    assert row_by_id[closed_id]["status"] == "CLOSED"
