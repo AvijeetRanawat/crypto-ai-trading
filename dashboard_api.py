@@ -2,6 +2,7 @@ from fastapi import Body, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
+import asyncio
 import database
 import sqlite3
 import os
@@ -60,6 +61,31 @@ def _resolve_engine_session():
     return now.isoformat(), int(time.time() * 1000), fallback_id
 
 SESSION_START, SESSION_START_MS, SESSION_ID = _resolve_engine_session()
+
+_SESSION_REFRESH_SECS = 30
+
+async def _session_refresh_loop():
+    """Periodically re-resolve the active engine session so API restarts are
+    not required after engine restarts.  Updates module globals in place so
+    all existing query call-sites automatically pick up the new session."""
+    global SESSION_START, SESSION_START_MS, SESSION_ID
+    while True:
+        await asyncio.sleep(_SESSION_REFRESH_SECS)
+        try:
+            new_start, new_start_ms, new_sid = _resolve_engine_session()
+            if new_sid != SESSION_ID:
+                logger.info(
+                    "Session refresh: %s → %s (start: %s)",
+                    SESSION_ID, new_sid, new_start,
+                )
+                SESSION_START, SESSION_START_MS, SESSION_ID = new_start, new_start_ms, new_sid
+        except Exception as exc:
+            logger.warning("Session refresh failed: %s", exc)
+
+@app.on_event("startup")
+async def _start_session_refresh():
+    asyncio.create_task(_session_refresh_loop())
+
 GLOBAL_STRATEGY_DECISION_SOURCES = (
     "DIRECTIONAL_EDGE_REJECT",
     "DETERMINISTIC_NEUTRAL",

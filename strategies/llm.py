@@ -13,7 +13,7 @@ from database import get_recent_lessons, get_distilled_rules
 # Key: (rsi_tier, macd, bb_zone, buy_votes, sell_votes, regime)
 # Value: (Signal, timestamp)
 _response_cache: dict = {}
-_CACHE_TTL_SECONDS = 60
+_CACHE_TTL_SECONDS = 120
 _CACHE_MAX_SIZE = 256  # Prevent unbounded growth
 
 def _cache_key(rsi, macd, bb_pct, buy_votes, sell_votes, regime):
@@ -295,7 +295,7 @@ class LLMAgent(BaseStrategy):
                 rules = []
                 for _c, l, _ in critiques[:3]:
                     adj_start = l.find("| Adj:")
-                    rule = l[adj_start + 7 :].strip() if adj_start >= 0 else l[:120]
+                    rule = l[adj_start + 7 :].strip() if adj_start >= 0 else l.strip()
                     rules.append(f"  - {rule}")
                 parts.append(
                     "\n<HARD_RULES — recent self-corrections you MUST follow>\n"
@@ -532,6 +532,7 @@ Output strictly valid JSON (no markdown):
         macd: str,
         bb_pct: float,
         regime: str,
+        lessons_ctx: str = "",
     ) -> tuple:
         """
         Cheap Haiku pre-gate: should we even bother calling Sonnet?
@@ -544,10 +545,20 @@ Output strictly valid JSON (no markdown):
         agreement = max(buy_votes, sell_votes)
 
         regime_note = "" if regime in ("BULL", "BEAR") else " Note: CHOPPY regimes are tradeable if agreement is strong."
+
+        # Inject hard rules so the gate doesn't skip setups that lessons say are valid
+        rules_block = ""
+        if lessons_ctx:
+            hard_start = lessons_ctx.find("<HARD_RULES")
+            hard_end = lessons_ctx.find("</HARD_RULES>")
+            if hard_start >= 0 and hard_end > hard_start:
+                rules_block = "\n" + lessons_ctx[hard_start:hard_end + len("</HARD_RULES>")] + "\n"
+
         prompt = (
             "You are a crypto trader.\n"
             f"Market snapshot: Regime={regime}, Direction={direction}, "
-            f"Agreement={agreement}/8 tools, RSI={rsi:.1f}, MACD={macd}, BB={bb_pct:.0f}%\n\n"
+            f"Agreement={agreement}/8 tools, RSI={rsi:.1f}, MACD={macd}, BB={bb_pct:.0f}%\n"
+            f"{rules_block}\n"
             "Question: Is this signal sufficiently strong for a full analysis? "
             f"Consider agreement level and indicator alignment.{regime_note} "
             "Reply with exactly one word: PASS or SKIP."
@@ -607,7 +618,11 @@ Output strictly valid JSON (no markdown):
                     meta={"llm_usage": usage_events, "decision_source": "LLM_CACHE"},
                 )
 
-        passes, gate_usage = self._haiku_gate(buy_count, sell_count, rsi, macd, bb_pct, regime)
+        # Build lessons context BEFORE haiku gate so gate decisions are
+        # informed by self-critiques and distilled rules
+        lessons_ctx = self._build_lessons_context()
+
+        passes, gate_usage = self._haiku_gate(buy_count, sell_count, rsi, macd, bb_pct, regime, lessons_ctx)
         if gate_usage:
             usage_events.append(gate_usage)
         if not passes:
@@ -626,8 +641,6 @@ Output strictly valid JSON (no markdown):
         low_24h = meta.get("low", current_price)
         vol_24h = meta.get("volume", 0)
         change_24h = meta.get("change_24h", 0)
-
-        lessons_ctx = self._build_lessons_context()
         tool_block = "\n".join([f"  - {t['name']}: {t['data']}" for t in tool_outputs])
 
         pro_lines = "\n".join(
