@@ -1,6 +1,7 @@
 import json
 import time
 import re
+import ast
 import boto3
 import requests
 from strategies.base import BaseStrategy, Signal
@@ -65,6 +66,9 @@ def _parse_json_object(text: str) -> dict:
             raise ValueError("review payload was not a JSON object")
         return parsed
     except Exception:
+        parsed_jsonish = _parse_jsonish_object(snippet)
+        if parsed_jsonish:
+            return parsed_jsonish
         # Best-effort fallback for partially malformed JSON-ish model output.
         # First try to close any truncated string/object before the regex path.
         closed = _close_truncated_json(snippet)
@@ -78,7 +82,27 @@ def _parse_json_object(text: str) -> dict:
         recovered = _recover_review_payload(closed or snippet)
         if recovered:
             return recovered
-        raise
+        return {}
+
+
+def _parse_jsonish_object(text: str) -> dict:
+    body = (text or "").strip()
+    if not body:
+        return {}
+    # Quote known keys so `literal_eval` can recover Python-dict-like output.
+    body = re.sub(
+        r'([{\[,]\s*)(verdict|confidence|reason|suggested_action)\s*:',
+        r'\1"\2":',
+        body,
+        flags=re.IGNORECASE,
+    )
+    try:
+        parsed = ast.literal_eval(body)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return {}
+    return {}
 
 
 def _close_truncated_json(text: str) -> str:

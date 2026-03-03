@@ -44,3 +44,16 @@ def test_parse_json_object_recovers_from_unterminated_reason_string():
     assert parsed["verdict"] == "OPPOSE"
     assert parsed["suggested_action"] == "SKIP"
     assert parsed["confidence"] == 0.41
+
+
+def test_parse_json_object_recovers_jsonish_unquoted_keys():
+    payload = """{
+      verdict: 'OPPOSE',
+      confidence: 0.63,
+      reason: 'schema drift from model',
+      suggested_action: 'SKIP'
+    }"""
+    parsed = _parse_json_object(payload)
+    assert parsed["verdict"] == "OPPOSE"
+    assert parsed["suggested_action"] == "SKIP"
+    assert parsed["confidence"] == 0.63

@@ -65,3 +65,58 @@ def test_rl_reward_skip_opportunity_updates_rl_and_logs(monkeypatch):
     assert engine.update_calls
     assert called["event_type"] == "SKIP_OPPORTUNITY"
     assert called["symbol"] == "BTCUSDT"
+
+
+def test_rl_reward_skip_opportunity_skips_non_actionable_penalties(monkeypatch):
+    engine = DummyEngine()
+    policy = {"rl_state_key": "state-x", "rl_profile_id": "profile-x"}
+
+    called = {}
+
+    def fake_save_rl_event(**kwargs):
+        called.update(kwargs)
+
+    monkeypatch.setattr(engine_rl_helpers, "save_rl_event", fake_save_rl_event)
+    monkeypatch.setattr(engine_rl_helpers.config, "ENABLE_RL_WEIGHT_AGENT", True)
+
+    rl_reward_skip_opportunity(
+        engine,
+        "SPOT",
+        policy,
+        expected_edge_pct=0.12,
+        reason="post_close_cooldown",
+        symbol="BTCUSDT",
+    )
+
+    assert not engine.update_calls
+    assert called["event_type"] == "SKIP_OPPORTUNITY"
+    assert called["reason"] == "post_close_cooldown"
+    assert called["reward"] == 0.0
+    assert called["penalty"] == 0.0
+    assert called["raw_penalty"] == 0.0
+
+
+def test_rl_reward_skip_opportunity_skips_non_actionable_penalties_with_reason_variants(monkeypatch):
+    engine = DummyEngine()
+    policy = {"rl_state_key": "state-x", "rl_profile_id": "profile-x"}
+
+    called = {}
+
+    def fake_save_rl_event(**kwargs):
+        called.update(kwargs)
+
+    monkeypatch.setattr(engine_rl_helpers, "save_rl_event", fake_save_rl_event)
+    monkeypatch.setattr(engine_rl_helpers.config, "ENABLE_RL_WEIGHT_AGENT", True)
+
+    rl_reward_skip_opportunity(
+        engine,
+        "SPOT",
+        policy,
+        expected_edge_pct=0.12,
+        reason="post-close-cooldown (safety)",
+        symbol="BTCUSDT",
+    )
+
+    assert not engine.update_calls
+    assert called["event_type"] == "SKIP_OPPORTUNITY"
+    assert called["reward"] == 0.0

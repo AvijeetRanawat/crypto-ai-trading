@@ -138,7 +138,8 @@ def summarize_rl_training(db_path: str, rl_weights_path: str) -> str:
 
     q_root = payload.get("q") if isinstance(payload.get("q"), dict) else {}
     n_root = payload.get("n") if isinstance(payload.get("n"), dict) else {}
-    modes = sorted(set(q_root.keys()) | set(n_root.keys()))
+    w_root = payload.get("w") if isinstance(payload.get("w"), dict) else {}
+    modes = sorted(set(q_root.keys()) | set(n_root.keys()) | set(w_root.keys()))
 
     if not modes:
         out.append("- no RL mode data found in weights payload")
@@ -193,6 +194,35 @@ def summarize_rl_training(db_path: str, rl_weights_path: str) -> str:
             out.append(f"  - avg Q best={best_pid}:{best_q:+.6f} worst={worst_pid}:{worst_q:+.6f}")
         else:
             out.append("  - avg Q: no values")
+
+        # Include actual learned multipliers from weights payload (w -> wm/vm).
+        w_mode = w_root.get(mode) if isinstance(w_root.get(mode), dict) else {}
+        if not w_mode:
+            out.append("  - learned multipliers: none")
+            continue
+
+        # rank states by total updates (from n), then print top 3 maps
+        scored_states: list[tuple[str, int]] = []
+        for state_key, state_payload in w_mode.items():
+            n_state = n_mode.get(state_key) if isinstance(n_mode.get(state_key), dict) else {}
+            updates = sum(int(v or 0) for v in n_state.values())
+            scored_states.append((state_key, updates))
+        scored_states.sort(key=lambda x: x[1], reverse=True)
+        top_states = scored_states[:3]
+
+        out.append("  - learned multipliers (top states):")
+        for state_key, updates in top_states:
+            state_payload = w_mode.get(state_key) if isinstance(w_mode.get(state_key), dict) else {}
+            wm = state_payload.get("wm") if isinstance(state_payload.get("wm"), dict) else {}
+            vm = state_payload.get("vm") if isinstance(state_payload.get("vm"), dict) else {}
+            reward_ema = state_payload.get("reward_ema", 0.0)
+            wm_txt = ", ".join(f"{k}={float(v):.4f}" for k, v in sorted(wm.items())) if wm else "-"
+            vm_txt = ", ".join(f"{k}={float(v):.4f}" for k, v in sorted(vm.items())) if vm else "-"
+            out.append(
+                f"    - state `{state_key}` updates={updates} reward_ema={float(reward_ema):+.6f}"
+            )
+            out.append(f"      - wm: {wm_txt}")
+            out.append(f"      - vm: {vm_txt}")
 
     if os.path.exists(db_path):
         conn = sqlite3.connect(db_path)

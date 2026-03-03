@@ -1,9 +1,27 @@
 from datetime import datetime
+import re
 
 from logger import logger
 from config import config
 from database import save_rl_event
 from rl_tuning import get_value as rl_cfg
+
+_NON_ACTIONABLE_SKIP_REASONS = {
+    "post_close_cooldown",
+    "entry_lockout",
+    "duplicate_block",
+    "direction_block",
+}
+
+
+def _is_non_actionable_skip_reason(reason: str) -> bool:
+    reason_norm = str(reason or "").strip().lower()
+    if not reason_norm:
+        return False
+    canonical = re.sub(r"[^a-z0-9]+", "_", reason_norm).strip("_")
+    if canonical in _NON_ACTIONABLE_SKIP_REASONS:
+        return True
+    return any(token in canonical for token in _NON_ACTIONABLE_SKIP_REASONS)
 
 
 def rl_infer(engine, mode: str, regime: str, session_quality: str, volatility_pct: float, sentiment_score: float, vote_imbalance: float, expected_edge_pct: float) -> dict:
@@ -73,6 +91,28 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
     state_key = str((policy_eval or {}).get("rl_state_key", "") or "")
     profile_id = str((policy_eval or {}).get("rl_profile_id", "") or "")
     if not state_key or not profile_id:
+        return
+    if _is_non_actionable_skip_reason(reason):
+        save_rl_event(
+            mode=mode,
+            profile_id=profile_id,
+            state_key=state_key,
+            event_type="SKIP_OPPORTUNITY",
+            reason=reason,
+            symbol=symbol,
+            reward=0.0,
+            penalty=0.0,
+            raw_penalty=0.0,
+            pnl_reward=0.0,
+            hold_secs=0.0,
+        )
+        logger.info(
+            "RL_SKIP_NO_PENALTY mode=%s profile=%s reason=%s edge=%.4f",
+            mode,
+            profile_id,
+            reason,
+            float(expected_edge_pct or 0.0),
+        )
         return
     edge_norm = max(0.0, float(expected_edge_pct or 0.0)) / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")), 0.001)
     mode_key = str(mode or "SPOT").upper()
