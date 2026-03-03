@@ -45,7 +45,7 @@ You are operating inside /Users/tanmaydas/dev/crypto-ai-trading.
 Task:
 1) Read RUN.md and follow its development workflow.
 2) Read data/anomaly_context.md, trading.log, and query trading_data.db as needed.
-3) Identify concrete anomalies and infer root causes.
+3) Identify concrete anomalies (if any) and infer root causes.
 4) Implement fixes directly in code (bugs and critical reliability enhancements only).
 5) Run validation checks:
    - make check-backend
