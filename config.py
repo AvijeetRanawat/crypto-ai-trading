@@ -245,7 +245,7 @@ class Config:
     MIN_MOMENTUM_PCT = _env_float("MIN_MOMENTUM_PCT", 0.0005)
 
     # ── AWS Bedrock LLM ──
-    BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "moonshotai.kimi-k2.5")
+    BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
     LOCAL_LLM_ENABLED = _env_bool("LOCAL_LLM_ENABLED", False)
     LOCAL_LLM_MODEL_PATH = os.getenv("LOCAL_LLM_MODEL_PATH", "")
     LOCAL_LLM_MODEL_NAME = os.getenv("LOCAL_LLM_MODEL_NAME", "local-llama")
@@ -253,7 +253,7 @@ class Config:
     LOCAL_LLM_MAX_TOKENS = _env_int("LOCAL_LLM_MAX_TOKENS", 200)
     BEDROCK_INFERENCE_PROFILE_ID = os.getenv("BEDROCK_INFERENCE_PROFILE_ID", "")
     AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-    HAIKU_MODEL_ID = os.getenv("HAIKU_MODEL_ID", "moonshotai.kimi-k2.5")
+    HAIKU_MODEL_ID = os.getenv("HAIKU_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4.1-mini")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
