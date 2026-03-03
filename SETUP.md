@@ -123,6 +123,48 @@ python run.py
 Open in browser:
 - `http://localhost:8000`
 
+### Recommended Development Mode (Smooth Iteration)
+
+Instead of `python run.py`, run services separately so changes in one area
+don’t interrupt everything:
+
+Terminal 1:
+```bash
+make dev-api
+```
+
+Terminal 2:
+```bash
+make dev-frontend
+```
+
+Terminal 3:
+```bash
+make dev-engine
+```
+
+This gives:
+- backend reloads only backend process
+- frontend hot reload (HMR) for UI changes
+- engine isolated from API/frontend restarts
+
+Optional single command (all three + log files in `.devlogs/`):
+```bash
+make dev
+```
+
+Fast checks during development:
+```bash
+make check-backend
+make check-frontend
+make smoke
+```
+
+One-shot:
+```bash
+make check
+```
+
 Frontend note:
 - React + TypeScript source is under `frontend/src`.
 - FastAPI serves compiled assets from `static/dist`.

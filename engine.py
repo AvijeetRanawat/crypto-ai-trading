@@ -344,19 +344,22 @@ class TradingEngine:
         buy_count: int = 0,
         sell_count: int = 0,
         total_vote_weight: float = 8.0,
+        rl_context: dict = None,
     ):
         if not bool(config.ENABLE_RL_WEIGHT_AGENT):
             return
-        vote_imbalance = min(1.0, abs(float(buy_count or 0) - float(sell_count or 0)) / max(total_vote_weight, 1.0))
-        rl_inf = self._rl_infer(
-            mode=str(mode or config.TRADING_PRODUCT).upper(),
-            regime=str((regime_result or {}).get("regime", "UNKNOWN")).upper(),
-            session_quality=str((session_filt or {}).get("quality", "LOW")).upper(),
-            volatility_pct=float((vol_result or {}).get("volatility_pct", 0.0) or 0.0),
-            sentiment_score=float((sentiment_snapshot or {}).get("sentiment_score", 0.0) or 0.0),
-            vote_imbalance=vote_imbalance,
-            expected_edge_pct=float(expected_edge_pct or 0.0),
-        )
+        rl_inf = dict(rl_context or {})
+        if not rl_inf.get("profile_id") or not rl_inf.get("state_key"):
+            vote_imbalance = min(1.0, abs(float(buy_count or 0) - float(sell_count or 0)) / max(total_vote_weight, 1.0))
+            rl_inf = self._rl_infer(
+                mode=str(mode or config.TRADING_PRODUCT).upper(),
+                regime=str((regime_result or {}).get("regime", "UNKNOWN")).upper(),
+                session_quality=str((session_filt or {}).get("quality", "LOW")).upper(),
+                volatility_pct=float((vol_result or {}).get("volatility_pct", 0.0) or 0.0),
+                sentiment_score=float((sentiment_snapshot or {}).get("sentiment_score", 0.0) or 0.0),
+                vote_imbalance=vote_imbalance,
+                expected_edge_pct=float(expected_edge_pct or 0.0),
+            )
         policy_eval = {
             "rl_profile_id": rl_inf.get("profile_id", ""),
             "rl_state_key": rl_inf.get("state_key", ""),
@@ -2299,6 +2302,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
                             intent(
@@ -2357,6 +2361,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
 
@@ -2429,6 +2434,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
 
@@ -2489,6 +2495,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
 
@@ -2529,6 +2536,7 @@ class TradingEngine:
                                 buy_count=buy_count,
                                 sell_count=sell_count,
                                 total_vote_weight=total_vote_weight,
+                                rl_context=rl_vote_inf,
                             )
                             continue
 
@@ -2567,6 +2575,7 @@ class TradingEngine:
                                 buy_count=buy_count,
                                 sell_count=sell_count,
                                 total_vote_weight=total_vote_weight,
+                                rl_context=rl_vote_inf,
                             )
                             continue
 
@@ -2607,6 +2616,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
                             if last_side == proposed_dir and price_diff_pct < 0.0015 and time_since < 1200:
@@ -2640,6 +2650,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
 
@@ -2753,6 +2764,7 @@ class TradingEngine:
                                     buy_count=buy_count,
                                     sell_count=sell_count,
                                     total_vote_weight=total_vote_weight,
+                                    rl_context=rl_vote_inf,
                                 )
                                 continue
 
@@ -2776,6 +2788,19 @@ class TradingEngine:
                             ema_result=ema_result,
                             ob_result=ob_result,
                             enforce_confidence_gate=False,
+                        )
+                        pre_policy = self._attach_rl_metadata(
+                            active_mode,
+                            pre_policy,
+                            {
+                                "regime_result": regime_result,
+                                "session_filt": session_filt,
+                                "vol_result": vol_result,
+                                "sentiment_snapshot": sentiment_snapshot,
+                                "buy_count": buy_count,
+                                "sell_count": sell_count,
+                                "expected_edge_pct": expected_edge_pct,
+                            },
                         )
                         self._log_product_eval(symbol, "pre-llm", pre_policy, mode=active_mode)
                         if not bool((pre_policy or {}).get("allow")):
@@ -2986,6 +3011,19 @@ class TradingEngine:
                             macd_result=macd_result,
                             ema_result=ema_result,
                             ob_result=ob_result,
+                        )
+                        post_policy = self._attach_rl_metadata(
+                            active_mode,
+                            post_policy,
+                            {
+                                "regime_result": regime_result,
+                                "session_filt": session_filt,
+                                "vol_result": vol_result,
+                                "sentiment_snapshot": sentiment_snapshot,
+                                "buy_count": buy_count,
+                                "sell_count": sell_count,
+                                "expected_edge_pct": expected_edge_pct,
+                            },
                         )
                         self._log_product_eval(symbol, "post-llm", post_policy, mode=active_mode)
                         if not bool((post_policy or {}).get("allow")):

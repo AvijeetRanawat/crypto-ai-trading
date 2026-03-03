@@ -327,7 +327,7 @@ export const DEFAULT_SUMMARY: PortfolioSummary = {
   llm_cost_per_traded_signal: null,
   llm_cost_per_dollar_pnl: null,
   llm_trade_conversion_rate: 0,
-  open_position: null,
+  open_positions: [],
 };
 
 export const DEFAULT_INTENT: IntentData = {

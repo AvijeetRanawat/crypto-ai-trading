@@ -96,6 +96,7 @@ describe("RightPanel integration", () => {
         }}
         strategyDiagnostics={DEFAULT_STRATEGY_DIAGNOSTICS}
         lessons={[]}
+        balances={null}
       />,
     );
 

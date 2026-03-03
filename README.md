@@ -65,6 +65,53 @@ python run.py
 Open:
 - `http://localhost:8000`
 
+## Smooth Dev Workflow (No Full-App Interruptions)
+
+Use this during active coding so one crash/reload does not kill everything:
+
+1. API only (hot reload):
+```bash
+make dev-api
+```
+2. Frontend only (Vite HMR):
+```bash
+make dev-frontend
+```
+3. Engine only:
+```bash
+make dev-engine
+```
+
+Run those in 3 terminals.
+
+Optional one-command runner (starts all three and writes logs to `.devlogs/`):
+```bash
+make dev
+```
+
+Useful checks while editing:
+
+```bash
+make check-backend
+make check-frontend
+make smoke
+```
+
+Or all at once:
+```bash
+make check
+```
+
+Autonomous anomaly triage + fix agent:
+```bash
+make agent-anomaly
+```
+
+If you must run `run.py` in dev, disable watchdog restarts:
+```bash
+make run-safe
+```
+
 ## Runtime Behavior
 
 `run.py` does the following when starting:
