@@ -69,3 +69,39 @@ def test_add_to_position_preserves_existing_trade_state(monkeypatch):
     assert pos["peak_pnl_pct"] == 0.12
     assert "pyramid" in pos["entry_reason"]
     assert sim.balance_usdt == 880.0
+
+
+def test_rl_penalize_skip_uses_existing_rl_context(monkeypatch):
+    eng = _engine(monkeypatch)
+    monkeypatch.setattr(engine_module.config, "ENABLE_RL_WEIGHT_AGENT", True)
+
+    called = {}
+
+    def fake_reward(mode, policy_eval, expected_edge_pct, reason, symbol):
+        called["mode"] = mode
+        called["policy_eval"] = dict(policy_eval or {})
+        called["expected_edge_pct"] = expected_edge_pct
+        called["reason"] = reason
+        called["symbol"] = symbol
+
+    monkeypatch.setattr(eng, "_rl_reward_skip_opportunity", fake_reward)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("_rl_infer should not be called when rl_context is provided")
+
+    monkeypatch.setattr(eng, "_rl_infer", fail_if_called)
+
+    eng._rl_penalize_skip(
+        mode="SPOT",
+        reason="regime_mismatch",
+        expected_edge_pct=0.12,
+        symbol="BTCUSDT",
+        rl_context={"profile_id": "aggressive", "state_key": "state-123"},
+    )
+
+    assert called["mode"] == "SPOT"
+    assert called["policy_eval"]["rl_profile_id"] == "aggressive"
+    assert called["policy_eval"]["rl_state_key"] == "state-123"
+    assert called["expected_edge_pct"] == 0.12
+    assert called["reason"] == "regime_mismatch"
+    assert called["symbol"] == "BTCUSDT"
