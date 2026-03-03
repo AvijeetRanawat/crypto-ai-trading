@@ -636,23 +636,26 @@ async def get_strategy_diagnostics(symbol: str = "BTCUSDT", mode: str = "SPOT", 
         confidence_expr = "COALESCE(claude_conf, 0)"
     action_expr = "deterministic_action" if "deterministic_action" in signal_cols else "NULL"
 
+    # session_signals counts are cross-mode: they reflect all outcomes in the session
+    # regardless of which mode tab the user is viewing, so FUTURES/OPTIONS trades
+    # aren't hidden when the panel is in SPOT mode.
     cur.execute(
-        f"""
+        """
         SELECT
             COUNT(*) AS total,
             SUM(CASE WHEN outcome='TRADED' THEN 1 ELSE 0 END) AS traded,
-            SUM(CASE WHEN outcome='MISSED' THEN 1 ELSE 0 END) AS missed
+            SUM(CASE WHEN outcome='MISSED' THEN 1 ELSE 0 END) AS missed,
+            SUM(CASE WHEN outcome='SKIPPED' THEN 1 ELSE 0 END) AS skipped
         FROM signal_events
         WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
-        AND ({mode_and_global_filter})
         """,
-        (symbol, SESSION_START, SESSION_ID, *mode_and_global_params),
+        (symbol, SESSION_START, SESSION_ID),
     )
     signal_stats = cur.fetchone()
     total_signals = int((signal_stats[0] or 0) if signal_stats else 0)
     traded_signals = int((signal_stats[1] or 0) if signal_stats else 0)
     missed_signals = int((signal_stats[2] or 0) if signal_stats else 0)
-    skipped_signals = max(0, total_signals - traded_signals - missed_signals)
+    skipped_signals = int((signal_stats[3] or 0) if signal_stats else 0)
 
     cur.execute(
         """
