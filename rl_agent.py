@@ -2,6 +2,8 @@ import json
 import os
 import random
 import threading
+import time
+import atexit
 from datetime import datetime
 
 import config
@@ -241,10 +243,13 @@ class RLWeightAgent:
         self.epsilon_decay = max(0.90, float(epsilon_decay))
         self.learning_rate = max(0.001, min(1.0, float(learning_rate)))
         self._lock = threading.RLock()
+        self._unsaved_updates = 0
+        self._last_save_monotonic = time.monotonic()
 
         self.profiles = PROFILES
         self.state = {"q": {}, "n": {}, "meta": {"epsilon": self.epsilon, "updated_at": ""}}
         self._load()
+        atexit.register(self.flush)
 
     def _default_mode_tables(self, mode: str):
         if mode not in self.state["q"]:
@@ -277,6 +282,7 @@ class RLWeightAgent:
             }
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, sort_keys=True)
+            self._last_save_monotonic = time.monotonic()
         except Exception as e:
             logger.warning("RL agent state save failed: %s", e)
 
@@ -437,8 +443,8 @@ class RLWeightAgent:
           4. Exploration noise (30% chance per update, decaying with evidence)
              lets weights explore directions not covered by any profile.
         """
-        if prev_n < 3:
-            return  # Need minimum evidence before adapting
+        if prev_n < 1:
+            return  # Need at least one prior visit before adapting
 
         w_table = self.state.setdefault("w", {}).setdefault(mode, {})
         entry = w_table.get(state_key)
@@ -492,7 +498,14 @@ class RLWeightAgent:
                     noisy = float(learned_w[key]) + random.gauss(0, noise_std)
                     learned_w[key] = round(max(0.5, min(2.0, noisy)), 4)
 
-    def update(self, mode: str, state_key: str, profile_id: str, reward: float):
+    def update(
+        self,
+        mode: str,
+        state_key: str,
+        profile_id: str,
+        reward: float,
+        adapt_weights: bool = True,
+    ):
         if not self.enabled:
             return
         mode = str(mode or "SPOT").upper()
@@ -525,17 +538,21 @@ class RLWeightAgent:
             else:
                 self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
 
-            # ── Update persistent learned weights ──
-            self._update_learned_weights(mode, state_key, profile_id, reward, prev_n)
+            # Skip/opportunity penalties should still train Q-values, but they
+            # should not directly mutate learned multipliers. This keeps weight
+            # adaptation tied to realized trade outcomes.
+            if bool(adapt_weights):
+                self._update_learned_weights(mode, state_key, profile_id, reward, prev_n)
 
-            # Batched save: persist every 10 updates to reduce I/O
-            self._unsaved_updates = getattr(self, '_unsaved_updates', 0) + 1
-            if self._unsaved_updates >= 10:
-                self._save()
-                self._unsaved_updates = 0
+            # Persist aggressively during early learning so short runs don't lose RL state.
+            self._unsaved_updates += 1
             total_n_mode = sum(
                 int(sum(v.values())) for v in self.state["n"].get(mode, {}).values() if v
             )
+            save_threshold = 1 if total_n_mode < 25 else 10
+            if self._unsaved_updates >= save_threshold or (time.monotonic() - self._last_save_monotonic) >= 30.0:
+                self._save()
+                self._unsaved_updates = 0
             q_all = {
                 pid: round(float(self.state["q"][mode].get(state_key, {}).get(pid, 0.0)), 5)
                 for pid in self.profiles.get(mode, {}).keys()
@@ -554,7 +571,7 @@ class RLWeightAgent:
     def flush(self):
         """Force-save any pending unsaved updates."""
         with self._lock:
-            if getattr(self, '_unsaved_updates', 0) > 0:
+            if self._unsaved_updates > 0:
                 self._save()
                 self._unsaved_updates = 0
 

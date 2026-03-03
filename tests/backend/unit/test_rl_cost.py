@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import database
+import dashboard_api
 from dashboard_api import app
 
 
@@ -10,6 +11,10 @@ def clean_rl_db(tmp_path, monkeypatch):
     db_file = tmp_path / "trading_test.db"
     monkeypatch.setattr(database, "DB_PATH", str(db_file))
     database.init_db()
+    # Align dashboard session identity with the test process so
+    # session-filtered queries match inserted rows.
+    monkeypatch.setattr(dashboard_api, "SESSION_ID", database.RUNTIME_SESSION_ID)
+    monkeypatch.setattr(dashboard_api, "SESSION_START", "2000-01-01T00:00:00")
     yield
 
 

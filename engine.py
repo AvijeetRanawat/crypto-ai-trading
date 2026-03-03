@@ -325,6 +325,30 @@ class TradingEngine:
     def _rl_apply_weight_multipliers(self, weights: dict, rl_inference: dict) -> dict:
         return rl_apply_weight_multipliers(weights, rl_inference)
 
+    def _resolve_rl_context(
+        self,
+        mode: str,
+        regime: str,
+        session_quality: str,
+        volatility_pct: float,
+        sentiment_score: float,
+        vote_imbalance: float,
+        expected_edge_pct: float,
+        rl_context: dict = None,
+    ) -> dict:
+        cached = dict(rl_context or {})
+        if cached.get("profile_id") and cached.get("state_key"):
+            return cached
+        return self._rl_infer(
+            mode=mode,
+            regime=regime,
+            session_quality=session_quality,
+            volatility_pct=volatility_pct,
+            sentiment_score=sentiment_score,
+            vote_imbalance=vote_imbalance,
+            expected_edge_pct=expected_edge_pct,
+        )
+
     def _attach_rl_metadata(self, mode: str, result: dict, kwargs: dict) -> dict:
         return attach_rl_metadata(self, mode, result, kwargs)
 
@@ -481,7 +505,7 @@ class TradingEngine:
         disagreement = min(buy_count, sell_count)
         margin = agreement - disagreement
 
-        scaled_min = max(2.0, 3.0 * (total_weight / 8.0))
+        scaled_min = max(1.5, 2.0 * (total_weight / 8.0))
         if agreement < scaled_min:
             return "NEUTRAL", 0.0, "insufficient deterministic agreement"
 
@@ -521,6 +545,7 @@ class TradingEngine:
         ob_result: dict,
         mode: str = None,
         enforce_confidence_gate: bool = True,
+        rl_context: dict = None,
     ) -> dict:
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
         if active_mode != "FUTURES":
@@ -673,7 +698,7 @@ class TradingEngine:
 
         session_map = {"PREMIUM": 1.0, "HIGH": 0.88, "MODERATE": 0.75, "LOW": 0.58}
         session_score = session_map.get(session_quality, 0.60)
-        rl_inf = self._rl_infer(
+        rl_inf = self._resolve_rl_context(
             mode="FUTURES",
             regime=str(regime_result.get("regime", "UNKNOWN")).upper(),
             session_quality=session_quality,
@@ -681,6 +706,7 @@ class TradingEngine:
             sentiment_score=sentiment_val,
             vote_imbalance=vote_imbalance,
             expected_edge_pct=expected_edge_pct,
+            rl_context=rl_context,
         )
 
         weights = {
@@ -802,6 +828,7 @@ class TradingEngine:
         ob_result: dict,
         mode: str = None,
         enforce_confidence_gate: bool = True,
+        rl_context: dict = None,
     ) -> dict:
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
         if active_mode != "OPTIONS":
@@ -977,7 +1004,7 @@ class TradingEngine:
         session_map = {"PREMIUM": 1.0, "HIGH": 0.90, "MODERATE": 0.74, "LOW": 0.56}
         session_score = session_map.get(session_quality, 0.60)
         edge_score = self._clamp(expected_edge_pct / max(float(rl_cfg("MIN_EXPECTED_EDGE_PCT")) * 2.8, 0.25))
-        rl_inf = self._rl_infer(
+        rl_inf = self._resolve_rl_context(
             mode="OPTIONS",
             regime=regime,
             session_quality=session_quality,
@@ -985,6 +1012,7 @@ class TradingEngine:
             sentiment_score=sentiment_val,
             vote_imbalance=vote_imbalance,
             expected_edge_pct=expected_edge_pct,
+            rl_context=rl_context,
         )
 
         weights = {
@@ -1093,6 +1121,7 @@ class TradingEngine:
         ob_result: dict,
         mode: str = None,
         enforce_confidence_gate: bool = True,
+        rl_context: dict = None,
     ) -> dict:
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
         if active_mode != "SPOT":
@@ -1257,7 +1286,7 @@ class TradingEngine:
                 win_rate_score = 0.50
         _cons_losses = self.consecutive_losses.get("SPOT", 0)
         performance_score = self._clamp(win_rate_score - (_cons_losses * 0.12))
-        rl_inf = self._rl_infer(
+        rl_inf = self._resolve_rl_context(
             mode="SPOT",
             regime=regime,
             session_quality=session_quality,
@@ -1265,6 +1294,7 @@ class TradingEngine:
             sentiment_score=sentiment_val,
             vote_imbalance=vote_imbalance,
             expected_edge_pct=expected_edge_pct,
+            rl_context=rl_context,
         )
 
         strategy = "SPOT_SELECTIVE_BUY"
@@ -2795,6 +2825,7 @@ class TradingEngine:
                             ema_result=ema_result,
                             ob_result=ob_result,
                             enforce_confidence_gate=False,
+                            rl_context=rl_vote_inf,
                         )
                         pre_policy = self._attach_rl_metadata(
                             active_mode,
@@ -2807,6 +2838,7 @@ class TradingEngine:
                                 "buy_count": buy_count,
                                 "sell_count": sell_count,
                                 "expected_edge_pct": expected_edge_pct,
+                                "rl_context": rl_vote_inf,
                             },
                         )
                         self._log_product_eval(symbol, "pre-llm", pre_policy, mode=active_mode)
@@ -2862,26 +2894,16 @@ class TradingEngine:
                         if borderline_setup:
                             llm_ok, llm_reason = self._llm_budget_ok()
                             if not llm_ok:
-                                self.skipped_cycles_by_mode[active_mode] += 1
-                                intent(f"⏳ LLM blocked: {llm_reason}", [symbol])
-                                save_signal_event(
-                                    symbol,
-                                    current_price,
-                                    raw_buy_count,
-                                    raw_sell_count,
-                                    buy_count,
-                                    sell_count,
-                                    total_vote_weight,
-                                    rsi_result["rsi"],
-                                    macd_result["crossover"],
-                                    bb_result["position_pct"],
-                                    "SKIPPED",
-                                    decision_source=self._mode_decision_source(active_mode, "LLM_BUDGET_BLOCK"),
-                                    deterministic_action=deterministic_dir,
-                                    deterministic_conf=det_conf,
-                                )
-                                continue
+                                # Fall back to deterministic trading instead of
+                                # skipping entirely — the setup already passed
+                                # all gates, so trade with reduced confidence.
+                                intent(f"⏳ LLM budget hit — using deterministic signal: {llm_reason}", [symbol])
+                                borderline_setup = False
+                                final_conf = max(0.55, det_conf * 0.85)
+                                final_reason = f"Deterministic (LLM budget): {det_reason}"
+                                decision_source = "DETERMINISTIC_LLM_FALLBACK"
 
+                        if borderline_setup:
                             last_llm = self.last_llm_call.get(active_mode)
                             if last_llm and (now - last_llm).total_seconds() < config.LLM_POLL_INTERVAL_SECONDS:
                                 self.skipped_cycles_by_mode[active_mode] += 1
@@ -3018,6 +3040,7 @@ class TradingEngine:
                             macd_result=macd_result,
                             ema_result=ema_result,
                             ob_result=ob_result,
+                            rl_context=rl_vote_inf,
                         )
                         post_policy = self._attach_rl_metadata(
                             active_mode,
@@ -3030,6 +3053,7 @@ class TradingEngine:
                                 "buy_count": buy_count,
                                 "sell_count": sell_count,
                                 "expected_edge_pct": expected_edge_pct,
+                                "rl_context": rl_vote_inf,
                             },
                         )
                         self._log_product_eval(symbol, "post-llm", post_policy, mode=active_mode)

@@ -144,6 +144,30 @@ def test_rl_weight_agent_negative_advantage_dampens(tmp_path):
             )
 
 
+def test_rl_weight_agent_can_skip_weight_adaptation(tmp_path):
+    state_file = tmp_path / "rl_state.json"
+    agent = rl_agent.RLWeightAgent(state_file=str(state_file), enabled=True, epsilon=0.0)
+    features = {
+        "regime": "TRENDING_UP",
+        "session_quality": "HIGH",
+        "volatility_pct": 0.2,
+        "sentiment_score": 0.15,
+        "vote_imbalance": 0.6,
+        "expected_edge_pct": 0.1,
+    }
+
+    result = agent.infer("SPOT", features)
+    state_key = result["state_key"]
+    profile_id = result["profile_id"]
+    initial_weights = dict(result["weight_mult"])
+
+    for _ in range(20):
+        agent.update("SPOT", state_key, profile_id, reward=0.05, adapt_weights=False)
+
+    learned = agent.infer("SPOT", features)["weight_mult"]
+    assert learned == initial_weights
+
+
 def test_mlx_agent_infer_and_update(tmp_path):
     if not rl_agent.is_mlx_available():
         pytest.skip("mlx not available")

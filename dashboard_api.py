@@ -24,10 +24,42 @@ app.add_middleware(
 )
 import time
 
-# ── Session start time — set once when this process boots ────────────────────
-SESSION_START = datetime.now().isoformat()
-SESSION_START_MS = int(time.time() * 1000)
-SESSION_ID = database.get_runtime_context()["session_id"]
+# ── Session identity ─────────────────────────────────────────────────────────
+# The dashboard runs in a separate process from the engine.  Generating a
+# new session_id here would mismatch the engine's session, causing every
+# session-filtered query to return empty.  Instead, look up the *active*
+# engine session from the database so both processes share the same view.
+
+def _resolve_engine_session():
+    """Return (session_start_iso, session_start_ms, session_id) for the
+    engine's most recent active session by looking at signal_events."""
+    try:
+        conn = database._conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT session_id, MIN(timestamp) FROM signal_events "
+            "WHERE session_id IS NOT NULL GROUP BY session_id "
+            "ORDER BY MIN(timestamp) DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            sid = row[0]
+            first_ts = row[1] or datetime.now().isoformat()
+            # Parse the session's first timestamp to derive start time
+            try:
+                dt = datetime.fromisoformat(first_ts)
+            except Exception:
+                dt = datetime.now()
+            return first_ts, int(dt.timestamp() * 1000), sid
+    except Exception:
+        pass
+    # Fallback: use this process's own context (same as before)
+    fallback_id = database.get_runtime_context()["session_id"]
+    now = datetime.now()
+    return now.isoformat(), int(time.time() * 1000), fallback_id
+
+SESSION_START, SESSION_START_MS, SESSION_ID = _resolve_engine_session()
 GLOBAL_STRATEGY_DECISION_SOURCES = (
     "DIRECTIONAL_EDGE_REJECT",
     "DETERMINISTIC_NEUTRAL",
@@ -319,7 +351,7 @@ async def get_portfolio_balances():
     """Get crypto asset balances with current prices and unrealized P&L."""
     conn = _db()
     cur = conn.cursor()
-    
+
     # Get open positions (these represent owned crypto assets in SPOT mode)
     cur.execute("""
         SELECT id, symbol, side, price as entry_price, quantity, entry_time
@@ -328,7 +360,7 @@ async def get_portfolio_balances():
         ORDER BY symbol, id
     """, (SESSION_ID,))
     positions = cur.fetchall()
-    
+
     # Get latest prices for all trading pairs
     latest_prices = {}
     for pos in positions:
@@ -341,43 +373,43 @@ async def get_portfolio_balances():
         price_row = cur.fetchone()
         if price_row:
             latest_prices[symbol] = price_row[0]
-    
+
     # Helper to parse trading pairs and get base/quote currencies
     def parse_symbol(symbol: str):
-        # Common quote currencies  
+        # Common quote currencies
         for quote in ['USDT', 'BUSD', 'USD']:
             if symbol.endswith(quote):
                 base = symbol[:-len(quote)]
                 return base, quote
         # For non-USD pairs, return None to filter them out
         return None, None
-    
+
     conn.close()
-    
+
     # Group positions by actual asset (base currency) with USD values
     balances = {}
     for pos in positions:
         pos_id, symbol, side, entry_price, quantity, entry_time = pos
-        
+
         base, quote = parse_symbol(symbol)
         # Skip non-USD pairs and SHORT positions (only show owned assets)
         if base is None or quote is None or side != "LONG":
             continue
-            
+
         current_price = latest_prices.get(symbol, entry_price)
-        
+
         # For LONG positions, we own the base currency
         asset_quantity = quantity
-        
+
         # For USD pairs, price is already in USD
         entry_price_usd = entry_price
         current_price_usd = current_price
-        
+
         # Calculate USD cost and value for LONG positions
         cost_usd = asset_quantity * entry_price_usd
         current_value_usd = asset_quantity * current_price_usd
         pnl_usd = current_value_usd - cost_usd
-        
+
         # Initialize asset if not seen before
         if base not in balances:
             balances[base] = {
@@ -391,12 +423,12 @@ async def get_portfolio_balances():
                 "unrealized_pnl_pct": 0.0,
                 "positions": []
             }
-        
+
         balances[base]["total_quantity"] += asset_quantity
         balances[base]["cost_basis"] += cost_usd
         balances[base]["current_value"] += current_value_usd
         balances[base]["unrealized_pnl"] += pnl_usd
-        
+
         balances[base]["positions"].append({
             "id": pos_id,
             "side": side,
@@ -407,7 +439,7 @@ async def get_portfolio_balances():
             "current_price": current_price_usd,
             "unrealized_pnl": pnl_usd
         })
-    
+
     # Calculate weighted average entry price and current price for each asset
     for asset_data in balances.values():
         total_qty = abs(asset_data["total_quantity"])
@@ -416,7 +448,7 @@ async def get_portfolio_balances():
             asset_data["current_price"] = asset_data["current_value"] / total_qty
         if asset_data["cost_basis"] > 0:
             asset_data["unrealized_pnl_pct"] = (asset_data["unrealized_pnl"] / asset_data["cost_basis"]) * 100
-    
+
     return {
         "balances": list(balances.values()),
         "total_unrealized_pnl": sum(b["unrealized_pnl"] for b in balances.values()),

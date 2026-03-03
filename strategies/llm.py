@@ -42,46 +42,49 @@ def _parse_json_object(text: str) -> dict:
     - extra prose before/after the object
     - trailing commas
     """
-    cleaned = _strip_fences(text)
-    if not cleaned:
-        raise ValueError("empty LLM response")
-
     try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
+        cleaned = _strip_fences(text)
+        if not cleaned:
+            raise ValueError("empty LLM response")
+
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            snippet = cleaned[start:end + 1]
+        else:
+            snippet = cleaned
+        snippet = re.sub(r",(\s*[}\]])", r"\1", snippet)
+        try:
+            parsed = json.loads(snippet)
+            if not isinstance(parsed, dict):
+                raise ValueError("review payload was not a JSON object")
             return parsed
+        except Exception:
+            parsed_jsonish = _parse_jsonish_object(snippet)
+            if parsed_jsonish:
+                return parsed_jsonish
+            # Best-effort fallback for partially malformed JSON-ish model output.
+            # First try to close any truncated string/object before the regex path.
+            closed = _close_truncated_json(snippet)
+            if closed != snippet:
+                try:
+                    parsed = json.loads(closed)
+                    if isinstance(parsed, dict) and parsed:
+                        return parsed
+                except Exception:
+                    pass
+            recovered = _recover_review_payload(closed or snippet)
+            if recovered:
+                return recovered
+            return {}
     except Exception:
-        pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start >= 0 and end > start:
-        snippet = cleaned[start:end + 1]
-    else:
-        snippet = cleaned
-    snippet = re.sub(r",(\s*[}\]])", r"\1", snippet)
-    try:
-        parsed = json.loads(snippet)
-        if not isinstance(parsed, dict):
-            raise ValueError("review payload was not a JSON object")
-        return parsed
-    except Exception:
-        parsed_jsonish = _parse_jsonish_object(snippet)
-        if parsed_jsonish:
-            return parsed_jsonish
-        # Best-effort fallback for partially malformed JSON-ish model output.
-        # First try to close any truncated string/object before the regex path.
-        closed = _close_truncated_json(snippet)
-        if closed != snippet:
-            try:
-                parsed = json.loads(closed)
-                if isinstance(parsed, dict) and parsed:
-                    return parsed
-            except Exception:
-                pass
-        recovered = _recover_review_payload(closed or snippet)
-        if recovered:
-            return recovered
         return {}
 
 
@@ -189,6 +192,19 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text or "") / 4))
 
 
+def _coerce_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        match = re.search(r"[-+]?\d*\.?\d+", str(value or ""))
+        if match:
+            try:
+                return float(match.group(0))
+            except Exception:
+                return float(default)
+        return float(default)
+
+
 def _bedrock_model_candidates(model_id: str) -> list:
     raw = str(model_id or "").strip()
     out = []
@@ -196,9 +212,17 @@ def _bedrock_model_candidates(model_id: str) -> list:
     if profile:
         out.append(profile)
     if raw:
-        out.append(raw)
-        if not (raw.startswith("us.") or raw.startswith("eu.") or raw.startswith("apac.") or raw.startswith("arn:")):
-            out.append(f"us.{raw}")
+        is_regional = raw.startswith(("us.", "eu.", "apac.")) or raw.startswith("arn:")
+        regional = f"us.{raw}" if not is_regional else ""
+        # Anthropic model IDs without a region prefix often fail on on-demand throughput.
+        # Prefer the regional alias first to avoid noisy retries.
+        if raw.startswith("anthropic.") and regional:
+            out.append(regional)
+            out.append(raw)
+        else:
+            out.append(raw)
+            if regional:
+                out.append(regional)
     # de-dupe while preserving order
     seen = set()
     uniq = []
@@ -487,7 +511,7 @@ Output strictly valid JSON (no markdown):
             usage_events.append(usage_event)
             result = _parse_json_object(llm_text)
             verdict = str(result.get("verdict", "NEUTRAL")).upper()
-            review_conf = float(result.get("confidence", 0.0) or 0.0)
+            review_conf = max(0.0, min(1.0, _coerce_float(result.get("confidence", 0.0), default=0.0)))
             rationale = str(result.get("reason", ""))
             suggested = str(result.get("suggested_action", "SKIP")).upper()
             return {
@@ -654,10 +678,12 @@ Output strictly valid JSON (no markdown):
             )
             usage_events.append(usage_event)
 
-            result = json.loads(_strip_fences(llm_text))
-            action = result.get("action", "NEUTRAL")
-            confidence = float(result.get("confidence", 0.0))
-            reason = result.get("reason", "LLM decision")
+            result = _parse_json_object(llm_text)
+            action = str(result.get("action", "NEUTRAL")).upper()
+            if action not in {"BUY", "SELL", "NEUTRAL"}:
+                action = "NEUTRAL"
+            confidence = max(0.0, min(1.0, _coerce_float(result.get("confidence", 0.0), default=0.0)))
+            reason = str(result.get("reason", "LLM decision")).strip() or "LLM decision"
 
             sig = Signal(
                 action,

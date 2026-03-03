@@ -30,7 +30,7 @@ def test_deterministic_decision_buy(monkeypatch):
 
 def test_deterministic_decision_neutral_when_low_agreement(monkeypatch):
     eng = _engine(monkeypatch)
-    action, conf, reason = eng._deterministic_decision(2, 1)
+    action, conf, reason = eng._deterministic_decision(1, 0)
     assert action == "NEUTRAL"
     assert conf == 0.0
     assert "insufficient" in reason
@@ -105,3 +105,36 @@ def test_rl_penalize_skip_uses_existing_rl_context(monkeypatch):
     assert called["expected_edge_pct"] == 0.12
     assert called["reason"] == "regime_mismatch"
     assert called["symbol"] == "BTCUSDT"
+
+
+def test_spot_policy_decision_uses_provided_rl_context(monkeypatch):
+    eng = _engine(monkeypatch)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("_rl_infer should not be called when rl_context is provided")
+
+    monkeypatch.setattr(eng, "_rl_infer", fail_if_called)
+
+    result = eng._spot_policy_decision(
+        symbol="BTCUSDT",
+        proposed_dir="LONG",
+        buy_count=6,
+        sell_count=2,
+        total_vote_weight=8.0,
+        confidence=0.72,
+        expected_edge_pct=0.11,
+        regime_result={"regime": "BULL", "strength": 0.8},
+        session_filt={"quality": "HIGH"},
+        vol_result={"volatility_pct": 0.08},
+        vol_prof={"spread_pct": 0.02, "volume_24h": 1_000_000.0},
+        sentiment_snapshot={"sentiment_score": 0.0, "components": {"articles_count": 0}},
+        vel_result={"velocity_1m": 0.08, "velocity_5m": 0.06},
+        macd_result={"crossover": "BULLISH_CROSS"},
+        ema_result={"signal": "BUY"},
+        ob_result={"bias": 0.04},
+        mode="SPOT",
+        rl_context={"profile_id": "balanced", "state_key": "state-xyz", "decision_type": "exploit"},
+    )
+
+    assert result["rl_profile_id"] == "balanced"
+    assert result["rl_state_key"] == "state-xyz"

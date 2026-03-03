@@ -11,6 +11,8 @@ _NON_ACTIONABLE_SKIP_REASONS = {
     "entry_lockout",
     "duplicate_block",
     "direction_block",
+    "pre_policy_reject",
+    "post_policy_reject",
 }
 
 
@@ -22,6 +24,13 @@ def _is_non_actionable_skip_reason(reason: str) -> bool:
     if canonical in _NON_ACTIONABLE_SKIP_REASONS:
         return True
     return any(token in canonical for token in _NON_ACTIONABLE_SKIP_REASONS)
+
+
+def _canonical_skip_reason(reason: str) -> str:
+    reason_norm = str(reason or "").strip().lower()
+    if not reason_norm:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", reason_norm).strip("_")
 
 
 def rl_infer(engine, mode: str, regime: str, session_quality: str, volatility_pct: float, sentiment_score: float, vote_imbalance: float, expected_edge_pct: float) -> dict:
@@ -50,6 +59,12 @@ def attach_rl_metadata(engine, mode: str, result: dict, kwargs: dict) -> dict:
     if not isinstance(result, dict):
         return result
     if result.get("rl_profile_id") and result.get("rl_state_key"):
+        return result
+    rl_context = dict((kwargs or {}).get("rl_context") or {})
+    if rl_context.get("profile_id") and rl_context.get("state_key"):
+        result["rl_profile_id"] = rl_context.get("profile_id", "")
+        result["rl_state_key"] = rl_context.get("state_key", "")
+        result["rl_decision_type"] = rl_context.get("decision_type", "")
         return result
     try:
         regime_result = kwargs.get("regime_result") or {}
@@ -92,13 +107,14 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
     profile_id = str((policy_eval or {}).get("rl_profile_id", "") or "")
     if not state_key or not profile_id:
         return
-    if _is_non_actionable_skip_reason(reason):
+    canonical_reason = _canonical_skip_reason(reason) or str(reason or "")
+    if _is_non_actionable_skip_reason(canonical_reason):
         save_rl_event(
             mode=mode,
             profile_id=profile_id,
             state_key=state_key,
             event_type="SKIP_OPPORTUNITY",
-            reason=reason,
+            reason=canonical_reason,
             symbol=symbol,
             reward=0.0,
             penalty=0.0,
@@ -110,7 +126,7 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
             "RL_SKIP_NO_PENALTY mode=%s profile=%s reason=%s edge=%.4f",
             mode,
             profile_id,
-            reason,
+            canonical_reason,
             float(expected_edge_pct or 0.0),
         )
         return
@@ -124,13 +140,16 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
     if mode_trade_rewards < int(rl_cfg("RL_MIN_CLOSED_TRADES_BEFORE_STRICT_GATES")):
         penalty_scale *= float(rl_cfg("RL_SKIP_PENALTY_LOW_TRADE_SCALE"))
     raw_penalty = float(rl_cfg("RL_OPPORTUNITY_COST_PENALTY")) * min(2.5, 0.5 + edge_norm) * max(0.1, penalty_scale)
-    penalty_cap = max(
-        float(rl_cfg("RL_SKIP_PENALTY_FLOOR")),
-        min(float(rl_cfg("RL_SKIP_PENALTY_CAP")), max(float(config.EARLY_STOP_LOSS_PCT), 0.05)),
-    )
-    penalty = max(float(rl_cfg("RL_SKIP_PENALTY_FLOOR")), min(abs(raw_penalty), penalty_cap))
+    # Edge-proportional cap: low-edge skips get small penalties, high-edge
+    # skips get larger ones.  This keeps the training signal informative
+    # instead of clamping everything to a single value.
+    cap_ceiling = float(rl_cfg("RL_SKIP_PENALTY_CAP"))
+    cap_floor = float(rl_cfg("RL_SKIP_PENALTY_FLOOR"))
+    edge_frac = min(1.0, edge_norm / 2.5)  # 0..1 based on edge quality
+    penalty_cap = cap_floor + (cap_ceiling - cap_floor) * edge_frac
+    penalty = max(cap_floor, min(abs(raw_penalty), penalty_cap))
     reward = -abs(penalty)
-    engine.rl_agent.update(mode, state_key, profile_id, reward)
+    engine.rl_agent.update(mode, state_key, profile_id, reward, adapt_weights=False)
     if hasattr(engine, "rl_updates_by_mode"):
         engine.rl_updates_by_mode[mode_key] = int(engine.rl_updates_by_mode.get(mode_key, 0) or 0) + 1
     save_rl_event(
@@ -138,7 +157,7 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
         profile_id=profile_id,
         state_key=state_key,
         event_type="SKIP_OPPORTUNITY",
-        reason=reason,
+        reason=canonical_reason,
         symbol=symbol,
         reward=reward,
         penalty=penalty,
@@ -150,7 +169,7 @@ def rl_reward_skip_opportunity(engine, mode: str, policy_eval: dict, expected_ed
         "RL_SKIP_PENALTY mode=%s profile=%s reason=%s edge=%.4f raw_pen=%.5f cap=%.5f scale=%.3f updates=%s closes=%s reward=%.5f",
         mode,
         profile_id,
-        reason,
+        canonical_reason,
         float(expected_edge_pct or 0.0),
         float(raw_penalty),
         float(penalty_cap),

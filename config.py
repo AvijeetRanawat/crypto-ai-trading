@@ -110,7 +110,7 @@ class Config:
 
     # Required by plan
     LLM_DAILY_BUDGET_USD = _env_float("LLM_DAILY_BUDGET_USD", 5.0)
-    LLM_MAX_CALLS_PER_HOUR = _env_int("LLM_MAX_CALLS_PER_HOUR", 8)
+    LLM_MAX_CALLS_PER_HOUR = _env_int("LLM_MAX_CALLS_PER_HOUR", 60)
     MAX_DAILY_DRAWDOWN_USD = _env_float("MAX_DAILY_DRAWDOWN_USD", 25.0)
     WARMUP_MIN_TICKS = max(5, _env_int("WARMUP_MIN_TICKS", 10))
     CHOPPY_EFFICIENCY_THRESHOLD = _env_float("CHOPPY_EFFICIENCY_THRESHOLD", 0.10)
@@ -128,9 +128,9 @@ class Config:
     RL_MLX_HIDDEN_SIZE = _env_int("RL_MLX_HIDDEN_SIZE", 16)
     RL_PROFIT_REWARD_MULTIPLIER = _env_float("RL_PROFIT_REWARD_MULTIPLIER", 3.0)  # Boost winning trade rewards
     RL_LOSS_PENALTY_MULTIPLIER = _env_float("RL_LOSS_PENALTY_MULTIPLIER", 1.0)  # Keep loss penalties 1:1
-    RL_OPPORTUNITY_COST_PENALTY = _env_float("RL_OPPORTUNITY_COST_PENALTY", 0.02)  # Reduced from 0.08
-    RL_SKIP_PENALTY_CAP = _env_float("RL_SKIP_PENALTY_CAP", 0.01)  # Reduced from 0.02
-    RL_SKIP_PENALTY_FLOOR = _env_float("RL_SKIP_PENALTY_FLOOR", 0.0005)  # Reduced from 0.001
+    RL_OPPORTUNITY_COST_PENALTY = _env_float("RL_OPPORTUNITY_COST_PENALTY", 0.005)  # Reduced: keep skip rewards << trade rewards
+    RL_SKIP_PENALTY_CAP = _env_float("RL_SKIP_PENALTY_CAP", 0.004)  # Upper bound for high-edge skips
+    RL_SKIP_PENALTY_FLOOR = _env_float("RL_SKIP_PENALTY_FLOOR", 0.0003)  # Lower bound for low-edge skips
     RL_OPEN_TRADE_COST_PENALTY = _env_float("RL_OPEN_TRADE_COST_PENALTY", 0.002)  # Reduced from 0.005
     RL_SKIP_PRESSURE_START = _env_int("RL_SKIP_PRESSURE_START", 6)
     RL_SKIP_PRESSURE_STEP = _env_float("RL_SKIP_PRESSURE_STEP", 0.04)
