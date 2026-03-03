@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/trading.log}"
 DB_FILE="${DB_FILE:-$ROOT_DIR/trading_data.db}"
+RL_WEIGHTS_FILE="${RL_WEIGHTS_FILE:-$ROOT_DIR/data/rl_weights.json}"
 REPORT_FILE="${REPORT_FILE:-$ROOT_DIR/data/anomaly_context.md}"
 LAST_MSG_FILE="${LAST_MSG_FILE:-$ROOT_DIR/data/anomaly_agent_last_message.txt}"
 
@@ -32,6 +33,7 @@ echo "[agent] Building anomaly context report..."
 .venv/bin/python scripts/agents/build_anomaly_context.py \
   --log "$LOG_FILE" \
   --db "$DB_FILE" \
+  --rl-weights "$RL_WEIGHTS_FILE" \
   --max-lines 2500 \
   --max-anomalies 180 \
   --output "$REPORT_FILE"
@@ -44,15 +46,17 @@ You are operating inside /Users/tanmaydas/dev/crypto-ai-trading.
 
 Task:
 1) Read RUN.md and follow its development workflow.
-2) Read data/anomaly_context.md, trading.log, and query trading_data.db as needed.
-3) Identify concrete anomalies (if any) and infer root causes.
-4) Implement fixes directly in code (bugs and critical reliability enhancements only).
-5) Run validation checks:
+2) Read data/anomaly_context.md, trading.log, data/rl_weights.json, and query trading_data.db as needed.
+3) Analyze RL training learnings so far (weights shifts, profile usage, reward trends, stalled learning risks).
+4) Identify concrete anomalies (if any) and infer root causes.
+5) Implement fixes directly in code (bugs and critical reliability enhancements only).
+6) Run validation checks:
    - make check-backend
    - make check-frontend
    - make smoke (only if API is up; otherwise explain why skipped)
-6) Provide a concise summary of:
+7) Provide a concise summary of:
    - anomalies found
+   - RL learning status
    - root causes
    - files changed
    - verification results
