@@ -34,6 +34,8 @@ _SPECS: dict[str, dict[str, Any]] = {
     "RL_SKIP_PENALTY_WARMUP_SCALE": {"type": "float", "default": float(config.RL_SKIP_PENALTY_WARMUP_SCALE), "min": 0.0, "max": 5.0},
     "RL_SKIP_PENALTY_LOW_TRADE_SCALE": {"type": "float", "default": float(config.RL_SKIP_PENALTY_LOW_TRADE_SCALE), "min": 0.0, "max": 5.0},
     "RL_WEIGHT_ADAPT_LR": {"type": "float", "default": float(config.RL_WEIGHT_ADAPT_LR), "min": 0.01, "max": 0.5},
+    "RL_PROFIT_REWARD_MULTIPLIER": {"type": "float", "default": float(config.RL_PROFIT_REWARD_MULTIPLIER), "min": 0.1, "max": 20.0},
+    "RL_LOSS_PENALTY_MULTIPLIER": {"type": "float", "default": float(config.RL_LOSS_PENALTY_MULTIPLIER), "min": 0.1, "max": 20.0},
 }
 
 

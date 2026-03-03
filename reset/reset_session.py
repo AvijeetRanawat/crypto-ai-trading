@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Session Reset — Wipes transient session data while PRESERVING all lessons and golden rules.
 
@@ -15,8 +16,14 @@ What gets PRESERVED:
   - intent table (reset to "Scanning...")
 
 Usage:
-  python3 reset_session.py
+  python3 reset/reset_session.py
 """
+import os
+import sys
+
+# Allow imports from project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import sqlite3
 from config import config
 from database import DB_PATH
@@ -24,7 +31,7 @@ from logger import logger
 
 
 def reset_session():
-    logger.info("🔄 SESSION RESET — Preserving lessons, clearing session data...")
+    logger.info("SESSION RESET — Preserving lessons, clearing session data...")
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -53,9 +60,9 @@ def reset_session():
     conn.commit()
     conn.close()
 
-    logger.info(f"   ✅ Cleared: {trades_n} trades, {port_n} portfolio snapshots, {sig_n} signal events, {price_n} price ticks")
-    logger.info(f"   ✅ Preserved: {lessons_n} lessons (all golden rules and self-critiques kept)")
-    logger.info("🆕 Session is RESET. Starting fresh with $%.0f balance and accumulated wisdom.", config.STARTING_BALANCE_USDT)
+    logger.info(f"   Cleared: {trades_n} trades, {port_n} portfolio snapshots, {sig_n} signal events, {price_n} price ticks")
+    logger.info(f"   Preserved: {lessons_n} lessons (all golden rules and self-critiques kept)")
+    logger.info("Session is RESET. Starting fresh with $%.0f balance and accumulated wisdom.", config.STARTING_BALANCE_USDT)
     print()
     print("=" * 60)
     print("  SESSION RESET COMPLETE")
@@ -66,11 +73,10 @@ def reset_session():
 
 
 if __name__ == "__main__":  # pragma: no cover
-    # Safety prompt
-    print("⚠️  This will CLEAR all trades, prices, and signal history.")
+    print("This will CLEAR all trades, prices, and signal history.")
     print("   Lessons and golden rules will be PRESERVED.")
     confirm = input("   Type 'yes' to confirm: ").strip().lower()
-    if confirm == 'yes':
+    if confirm == "yes":
         reset_session()
     else:
         print("Reset cancelled.")
