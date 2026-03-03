@@ -17,6 +17,9 @@ class DummyTradeLogger:
 @pytest.fixture(autouse=True)
 def ensure_symbol_allowed(monkeypatch):
     monkeypatch.setattr(config, "is_symbol_allowed", lambda symbol: True)
+    # Prevent __init__ from hitting the live DB to restore positions
+    monkeypatch.setattr(engine_simulator, "get_open_positions", lambda: [])
+    monkeypatch.setattr(engine_simulator, "get_latest_balance", lambda: None)
     yield
 
 

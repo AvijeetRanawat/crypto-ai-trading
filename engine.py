@@ -9,6 +9,7 @@ from database import (
     save_trade,
     update_trade_exit,
     save_portfolio_snapshot,
+    save_portfolio_full_snapshot,
     update_intent,
     save_signal_event,
     save_llm_usage,
@@ -96,6 +97,7 @@ class TradingEngine:
         self.missed_opportunities_count = 0
         self.last_entry_prices: dict = {}      # key(symbol:mode) -> (price, side, timestamp)
         self.direction_block: dict = {}         # key(symbol:mode) -> {side, blocked_until}
+        self._latest_prices: dict = {}          # symbol -> most-recently-seen price (for portfolio valuation)         # key(symbol:mode) -> {side, blocked_until}
         self.last_close_time_by_mode: dict[str, datetime] = {}
         self.symbol_drift_alerted = set()
         self.consecutive_losses: dict[str, int] = {"SPOT": 0, "FUTURES": 0, "OPTIONS": 0}
@@ -1511,6 +1513,94 @@ class TradingEngine:
 
         return False, ""
 
+    def _save_portfolio_snapshot(self, trigger: str = "EVENT"):
+        """Persist a full portfolio snapshot: cash, equity, per-asset values, PnL, win-rate, missed."""
+        try:
+            bal = float(self.simulator.balance_usdt or 0.0)
+            realized = float(self.total_session_pnl or 0.0)
+            wins = int(self.session_tracker.wins or 0)
+            losses = int(self.session_tracker.losses or 0)
+            missed = int(self.missed_opportunities_count or 0)
+            total_trades = int(self.trades_executed or 0)
+
+            positions_data = []
+            unrealized_total = 0.0
+            now = datetime.now()
+            for pos_key, pos in list(self.simulator.positions.items()):
+                symbol = pos.get("symbol", "")
+                entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+                qty = float(pos.get("quantity", 0.0) or 0.0)
+                cur_price = float(self._latest_prices.get(symbol, entry_price) or entry_price)
+                side = pos.get("side", "LONG")
+                mode = pos.get("mode", "SPOT")
+                notional = qty * entry_price
+                cur_value = qty * cur_price
+                unrealized = (cur_price - entry_price) * qty if side == "LONG" else (entry_price - cur_price) * qty
+                unrealized_pct = round(unrealized / notional * 100, 3) if notional > 0 else 0.0
+                hold_secs = int((now - pos.get("entry_time", now)).total_seconds())
+                unrealized_total += unrealized
+                rl_ctx = pos.get("rl_context") or {}
+                positions_data.append({
+                    "key": pos_key,
+                    "symbol": symbol,
+                    "mode": mode,
+                    "side": side,
+                    "entry_price": round(entry_price, 6),
+                    "current_price": round(cur_price, 6),
+                    "quantity": round(qty, 6),
+                    "notional_usd": round(notional, 2),
+                    "current_usd_value": round(cur_value, 2),
+                    "unrealized_pnl": round(unrealized, 4),
+                    "unrealized_pnl_pct": unrealized_pct,
+                    "hold_secs": hold_secs,
+                    "entry_reason": (pos.get("entry_reason") or "")[:120],
+                    "rl_profile": rl_ctx.get("profile_id", ""),
+                    "rl_decision": rl_ctx.get("decision_type", ""),
+                })
+
+            total_equity = bal + sum(p["current_usd_value"] for p in positions_data)
+
+            # Summarize open assets log
+            if positions_data:
+                asset_lines = "  ".join(
+                    f"{p['symbol']} {p['side']} {p['mode']} ${p['current_usd_value']:.2f} "
+                    f"(PnL {p['unrealized_pnl_pct']:+.2f}%)"
+                    for p in positions_data
+                )
+                logger.info(
+                    "PORTFOLIO [%s]  cash=$%.2f  equity=$%.2f  realized=%+.2f  unrealized=%+.2f  "
+                    "W/L=%d/%d (%.0f%%)  trades=%d  missed=%d  open=%d\n"
+                    "  assets: %s",
+                    trigger, bal, total_equity, realized, unrealized_total,
+                    wins, losses, (wins / (wins + losses) * 100 if (wins + losses) > 0 else 0),
+                    total_trades, missed, len(positions_data),
+                    asset_lines,
+                )
+            else:
+                logger.info(
+                    "PORTFOLIO [%s]  cash=$%.2f  equity=$%.2f  realized=%+.2f  unrealized=%+.2f  "
+                    "W/L=%d/%d (%.0f%%)  trades=%d  missed=%d  open=0",
+                    trigger, bal, total_equity, realized, unrealized_total,
+                    wins, losses, (wins / (wins + losses) * 100 if (wins + losses) > 0 else 0),
+                    total_trades, missed,
+                )
+
+            save_portfolio_full_snapshot(
+                balance_usdt=bal,
+                total_equity=total_equity,
+                realized_pnl=realized,
+                unrealized_pnl=unrealized_total,
+                win_count=wins,
+                loss_count=losses,
+                total_trades=total_trades,
+                missed_count=missed,
+                open_positions_count=len(positions_data),
+                positions=positions_data,
+                trigger=trigger,
+            )
+        except Exception as _snap_err:
+            logger.warning("Portfolio snapshot failed (%s): %s", trigger, _snap_err)
+
     async def _close_trade(self, symbol, current_price, reason, mode: str = None):
         """Helper to close a position and run retrospective."""
         active_mode = str(mode or config.TRADING_PRODUCT).upper()
@@ -1608,6 +1698,9 @@ class TradingEngine:
                     reward,
                 )
             self._pending_rl_by_symbol.pop(pos_key, None)
+
+            # ── Persist full portfolio accounting after every close ──
+            self._save_portfolio_snapshot(trigger="EXIT")
 
             if self.retro_agent:
                 try:
@@ -1777,6 +1870,7 @@ class TradingEngine:
                     continue
 
                 prices = self.client.latest_prices
+                self._latest_prices.update(prices)  # keep rolling snapshot for portfolio valuation
 
                 kill, reason = self._check_kill_switch(prices)
                 if kill and not self.trading_halted_reason:
@@ -3121,6 +3215,7 @@ class TradingEngine:
                             llm_conf=final_conf if decision_source == "LLM_TIEBREAKER" else None,
                             llm_cost_usd=llm_cost if decision_source == "LLM_TIEBREAKER" else 0.0,
                             mode=selected_mode,
+                            rl_context=rl_context,
                         )
 
                         if not entered:
@@ -3138,7 +3233,6 @@ class TradingEngine:
                             self.simulator.positions[pos_key]["spot_strategy"] = product_strategy
                             self.simulator.positions[pos_key]["options_strategy"] = product_strategy
                             self.simulator.positions[pos_key]["selected_product"] = selected_mode
-                            self.simulator.positions[pos_key]["rl_context"] = rl_context
 
                         save_signal_event(
                             symbol,
@@ -3161,6 +3255,8 @@ class TradingEngine:
                             llm_tokens=llm_tokens,
                         )
                         symbols_with_positions.add(symbol)
+                        # ── Persist full portfolio accounting after entry ──
+                        self._save_portfolio_snapshot(trigger="ENTRY")
                         continue  # keep scanning other symbols for entries
 
             except Exception as e:

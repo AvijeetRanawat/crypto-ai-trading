@@ -11,6 +11,9 @@ import uvicorn
 
 from logger import logger
 
+LOG_TRIM_INTERVAL_SECS = 3600   # run every hour
+LOG_TRIM_PCT = 0.10             # drop oldest 10% of lines
+
 
 def run_dashboard():
     from dashboard_api import app
@@ -74,12 +77,40 @@ def _snapshot_backend_files(root_dir: str) -> Dict[str, int]:
     return snapshot
 
 
-def _start_children() -> Tuple[multiprocessing.Process, multiprocessing.Process]:
+def _trim_log(log_path: str) -> None:
+    """Drop the oldest LOG_TRIM_PCT fraction of lines from log_path."""
+    try:
+        if not os.path.exists(log_path):
+            return
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if not lines:
+            return
+        drop = max(1, int(len(lines) * LOG_TRIM_PCT))
+        kept = lines[drop:]
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== Log trimmed {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (dropped {drop} lines) ===\n")
+            f.writelines(kept)
+        logger.info("LOG_TRIM dropped=%d kept=%d path=%s", drop, len(kept), log_path)
+    except Exception as e:
+        logger.warning("LOG_TRIM failed: %s", e)
+
+
+def run_log_trimmer(log_path: str) -> None:
+    """Long-running worker: trim the log file every LOG_TRIM_INTERVAL_SECS."""
+    while True:
+        time.sleep(LOG_TRIM_INTERVAL_SECS)
+        _trim_log(log_path)
+
+
+def _start_children(log_path: str) -> Tuple[multiprocessing.Process, multiprocessing.Process, multiprocessing.Process]:
     p1 = multiprocessing.Process(target=run_dashboard)
     p2 = multiprocessing.Process(target=start_agent_loop)
+    p3 = multiprocessing.Process(target=run_log_trimmer, args=(log_path,), daemon=True)
     p1.start()
     p2.start()
-    return p1, p2
+    p3.start()
+    return p1, p2, p3
 
 
 def _free_port(port: int, retries: int = 10, delay: float = 0.4) -> None:
@@ -123,14 +154,16 @@ def _stop_children(*procs: multiprocessing.Process):
     _free_port(8000)
 
 
-def _supervise(auto_restart: bool, root_dir: str):
-    p1, p2 = _start_children()
+def _supervise(auto_restart: bool, root_dir: str, log_path: str):
+    p1, p2, p3 = _start_children(log_path)
     if not auto_restart:
         p1.join()
         p2.join()
         return
 
     logger.info("Auto-restart watcher enabled for backend file changes.")
+    logger.info("Log trimmer started: drops oldest %.0f%% every %dmin.",
+                LOG_TRIM_PCT * 100, LOG_TRIM_INTERVAL_SECS // 60)
     last_snapshot = _snapshot_backend_files(root_dir)
 
     while True:
@@ -138,14 +171,14 @@ def _supervise(auto_restart: bool, root_dir: str):
 
         if not p1.is_alive() or not p2.is_alive():
             logger.warning("One child process exited. Stopping both.")
-            _stop_children(p1, p2)
+            _stop_children(p1, p2, p3)
             break
 
         current_snapshot = _snapshot_backend_files(root_dir)
         if current_snapshot != last_snapshot:
             logger.info("Detected backend file change. Restarting dashboard + agent...")
-            _stop_children(p1, p2)
-            p1, p2 = _start_children()
+            _stop_children(p1, p2, p3)
+            p1, p2, p3 = _start_children(log_path)
             last_snapshot = current_snapshot
 
 
@@ -193,7 +226,7 @@ if __name__ == "__main__":
     auto_restart = _env_bool("AUTO_RESTART_ON_BACKEND_CHANGES", True)
 
     try:
-        _supervise(auto_restart=auto_restart, root_dir=root)
+        _supervise(auto_restart=auto_restart, root_dir=root, log_path=log_path)
     except KeyboardInterrupt:
         logger.info("Shutting down processes...")
     finally:

@@ -337,6 +337,25 @@ class RLWeightAgent:
             adapted_weights = dict(learned.get("wm", {})) or dict(profile.get("weight_mult", {}))
             adapted_voter_weights = dict(learned.get("vm", {})) or dict(profile.get("voter_weight_mult", {}))
 
+            # ── Detailed RL infer log ──
+            q_summary = {pid: round(float(q_mode.get(pid, 0.0)), 5) for pid in profile_ids}
+            n_summary = {pid: int(n_mode.get(pid, 0) or 0) for pid in profile_ids}
+            best_pid = max(profile_ids, key=lambda p: float(q_mode.get(p, 0.0)))
+            logger.info(
+                "RL_INFER mode=%s  decision=%s  chosen=%s  eps=%.4f\n"
+                "  state     : %s\n"
+                "  q_values  : %s\n"
+                "  n_visits  : %s\n"
+                "  best_q_pid: %s (q=%+.5f)  size_mult=%.2f  conf_bias=%+.3f",
+                mode, decision_type, profile_id, float(self.epsilon),
+                state_key,
+                {k: f"{v:+.5f}" for k, v in q_summary.items()},
+                n_summary,
+                best_pid, float(q_mode.get(best_pid, 0.0)),
+                float(profile.get("size_mult", 1.0)),
+                float(profile.get("confidence_bias", 0.0)),
+            )
+
             return {
                 "mode": mode,
                 "state_key": state_key,
@@ -496,16 +515,22 @@ class RLWeightAgent:
             if self._unsaved_updates >= 10:
                 self._save()
                 self._unsaved_updates = 0
+            total_n_mode = sum(
+                int(sum(v.values())) for v in self.state["n"].get(mode, {}).values() if v
+            )
+            q_all = {
+                pid: round(float(self.state["q"][mode].get(state_key, {}).get(pid, 0.0)), 5)
+                for pid in self.profiles.get(mode, {}).keys()
+            }
             logger.info(
-                "RL_UPDATE mode=%s state=%s profile=%s reward=%.5f q_prev=%.5f q_new=%.5f n=%s eps=%.4f",
-                mode,
+                "RL_UPDATE mode=%s  profile=%s  reward=%+.5f  q: %.5f → %.5f (δ%+.5f)  n=%d  eps=%.4f\n"
+                "  state        : %s\n"
+                "  all_q        : %s\n"
+                "  mode_total_n : %d",
+                mode, profile_id, reward, prev_q, new_q, new_q - prev_q, prev_n + 1, self.epsilon,
                 state_key,
-                profile_id,
-                reward,
-                prev_q,
-                new_q,
-                prev_n + 1,
-                self.epsilon,
+                {k: f"{v:+.5f}" for k, v in q_all.items()},
+                total_n_mode,
             )
 
     def flush(self):

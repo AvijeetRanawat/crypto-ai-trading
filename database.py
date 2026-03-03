@@ -243,6 +243,29 @@ def init_db():
         """
     )
 
+    # Full Portfolio Snapshot Table — rich per-event accounting
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_full (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            trigger TEXT,
+            balance_usdt REAL,
+            total_equity REAL,
+            realized_pnl REAL,
+            unrealized_pnl REAL,
+            win_count INTEGER,
+            loss_count INTEGER,
+            win_rate_pct REAL,
+            total_trades INTEGER,
+            missed_count INTEGER,
+            open_positions_count INTEGER,
+            positions_json TEXT
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_full_ts ON portfolio_full(timestamp)")
+
     # Migration safety for existing DBs.
     _ensure_column(cursor, "trades", "session_id", "TEXT")
     _ensure_column(cursor, "trades", "process_id", "INTEGER")
@@ -250,6 +273,8 @@ def init_db():
     _ensure_column(cursor, "trades", "deterministic_conf", "REAL")
     _ensure_column(cursor, "trades", "llm_conf", "REAL")
     _ensure_column(cursor, "trades", "llm_cost_usd", "REAL")
+    _ensure_column(cursor, "trades", "mode", "TEXT DEFAULT 'SPOT'")
+    _ensure_column(cursor, "trades", "rl_context_json", "TEXT")
 
     _ensure_column(cursor, "signal_events", "session_id", "TEXT")
     _ensure_column(cursor, "signal_events", "process_id", "INTEGER")
@@ -303,16 +328,19 @@ def save_trade(
     llm_conf=None,
     llm_cost_usd=None,
     mode="SPOT",
+    rl_context=None,
 ):
     conn = _conn()
     cursor = conn.cursor()
+    rl_context_json = json.dumps(rl_context) if rl_context else None
     cursor.execute(
         """
         INSERT INTO trades (
             symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status,
-            session_id, process_id, decision_source, deterministic_conf, llm_conf, llm_cost_usd, mode
+            session_id, process_id, decision_source, deterministic_conf, llm_conf, llm_cost_usd,
+            mode, rl_context_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             symbol,
@@ -331,12 +359,67 @@ def save_trade(
             llm_conf,
             llm_cost_usd,
             mode,
+            rl_context_json,
         ),
     )
     trade_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return trade_id
+
+
+def get_open_positions() -> list:
+    """Return all trades with status=OPEN as a list of dicts."""
+    conn = _conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, symbol, side, price, quantity, entry_time, mode, rl_context_json, reason
+        FROM trades WHERE status = 'OPEN'
+        ORDER BY entry_time ASC
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        trade_id, symbol, side, price, quantity, entry_time_str, mode, rl_ctx_json, reason = row
+        rl_context = None
+        if rl_ctx_json:
+            try:
+                rl_context = json.loads(rl_ctx_json)
+            except Exception:
+                pass
+        try:
+            entry_time = datetime.fromisoformat(entry_time_str)
+        except Exception:
+            entry_time = datetime.now()
+        result.append({
+            "db_id": trade_id,
+            "symbol": str(symbol).upper(),
+            "side": side,
+            "entry_price": float(price),
+            "quantity": float(quantity),
+            "entry_time": entry_time,
+            "mode": str(mode or "SPOT").upper(),
+            "rl_context": rl_context,
+            "entry_reason": reason or "",
+        })
+    return result
+
+
+def get_latest_balance() -> float | None:
+    """Return the most recent balance_usdt from the portfolio snapshot table."""
+    conn = _conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT balance_usdt FROM portfolio ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
 
 
 def update_trade_exit(trade_id, exit_time, pnl, status="CLOSED"):
@@ -361,6 +444,53 @@ def save_portfolio_snapshot(balance, positions_count):
         VALUES (?, ?, ?)
         """,
         (datetime.now().isoformat(), balance, positions_count),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_portfolio_full_snapshot(
+    balance_usdt: float,
+    total_equity: float,
+    realized_pnl: float,
+    unrealized_pnl: float,
+    win_count: int,
+    loss_count: int,
+    total_trades: int,
+    missed_count: int,
+    open_positions_count: int,
+    positions: list,
+    trigger: str = "EVENT",
+):
+    """Persist a full portfolio snapshot including per-asset crypto holdings, PnL, and win rates."""
+    total = win_count + loss_count
+    win_rate = round((win_count / total * 100) if total > 0 else 0.0, 2)
+    conn = _conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO portfolio_full (
+            timestamp, trigger, balance_usdt, total_equity,
+            realized_pnl, unrealized_pnl,
+            win_count, loss_count, win_rate_pct,
+            total_trades, missed_count, open_positions_count, positions_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.now().isoformat(),
+            str(trigger),
+            round(float(balance_usdt or 0.0), 4),
+            round(float(total_equity or 0.0), 4),
+            round(float(realized_pnl or 0.0), 4),
+            round(float(unrealized_pnl or 0.0), 4),
+            int(win_count or 0),
+            int(loss_count or 0),
+            win_rate,
+            int(total_trades or 0),
+            int(missed_count or 0),
+            int(open_positions_count or 0),
+            json.dumps(positions or []),
+        ),
     )
     conn.commit()
     conn.close()

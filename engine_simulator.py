@@ -5,6 +5,8 @@ from database import (
     save_trade,
     save_portfolio_snapshot,
     update_trade_exit,
+    get_open_positions,
+    get_latest_balance,
 )
 from logger import logger, log_trade
 
@@ -13,6 +15,35 @@ class PaperTradingSimulator:
     def __init__(self):
         self.balance_usdt = float(config.STARTING_BALANCE_USDT)
         self.positions = {}
+        self._restore_open_positions()
+
+    def _restore_open_positions(self):
+        """On startup, reload any OPEN trades from DB so the engine can manage them."""
+        open_trades = get_open_positions()
+        if not open_trades:
+            return
+        restored_balance = get_latest_balance()
+        if restored_balance is not None:
+            self.balance_usdt = restored_balance
+        for row in open_trades:
+            pos_key = self._pos_key(row["symbol"], row["mode"])
+            self.positions[pos_key] = {
+                "symbol": row["symbol"],
+                "mode": row["mode"],
+                "side": row["side"],
+                "entry_price": row["entry_price"],
+                "quantity": row["quantity"],
+                "entry_time": row["entry_time"],
+                "db_id": row["db_id"],
+                "entry_reason": row["entry_reason"],
+                "rl_context": row["rl_context"],
+                "peak_pnl_pct": 0.0,
+                "trailing_active": False,
+            }
+        logger.info(
+            "RESTORED %d open position(s) from DB (balance=%.2f)",
+            len(open_trades), self.balance_usdt,
+        )
 
     def total_equity(self, latest_prices: dict | None = None) -> float:
         """Return cash + unrealized value of all open positions.
@@ -48,6 +79,7 @@ class PaperTradingSimulator:
         llm_conf=None,
         llm_cost_usd=None,
         mode=None,
+        rl_context=None,
     ):
         if not config.is_symbol_allowed(symbol):
             logger.error(f"Blocked non-allowlisted trade symbol: {symbol}")
@@ -63,6 +95,7 @@ class PaperTradingSimulator:
             return False
 
         quantity = amount_usdt / price
+        balance_before = self.balance_usdt
         self.balance_usdt -= amount_usdt
         entry_time = datetime.now()
 
@@ -78,6 +111,7 @@ class PaperTradingSimulator:
             llm_conf=llm_conf,
             llm_cost_usd=llm_cost_usd,
             mode=mode,
+            rl_context=rl_context,
         )
 
         self.positions[pos_key] = {
@@ -89,15 +123,37 @@ class PaperTradingSimulator:
             "entry_time": entry_time,
             "db_id": db_id,
             "entry_reason": reason,
+            "rl_context": rl_context,
             "peak_pnl_pct": 0.0,
             "trailing_active": False,
         }
         log_trade(side, symbol, price, quantity, reason, trade_id=db_id)
         save_portfolio_snapshot(self.balance_usdt, len(self.positions))
 
-        emoji = "📈" if side == "LONG" else "📉"
-        price_fmt = f"${price:,.2f}" if price >= 1.0 else f"${price:.6f}"
-        logger.info(f"{emoji} {side}: {symbol} at {price_fmt} | Size: ${amount_usdt:,.0f} | Bal: ${self.balance_usdt:,.0f}")
+        rl_profile = (rl_context or {}).get("profile_id", "-")
+        rl_decision = (rl_context or {}).get("decision_type", "-")
+        rl_q = float((rl_context or {}).get("q_value", 0.0) or 0.0)
+        rl_state = (rl_context or {}).get("state_key", "-")
+        ep_fmt = f"${price:,.6f}" if price < 1.0 else f"${price:,.2f}"
+        src_tag = decision_source or "-"
+        det_str = f"{deterministic_conf:.3f}" if deterministic_conf is not None else "-"
+        llm_str = f"{llm_conf:.3f}" if llm_conf is not None else "-"
+        logger.info(
+            "\u250c\u2500 TRADE ENTRY \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u2502  Symbol  : %-10s | Mode: %-8s | Side: %s\n"
+            "\u2502  Price   : %-14s | Qty: %.6f | Notional: $%.2f\n"
+            "\u2502  Balance : $%.2f \u2192 $%.2f | DB id: %s\n"
+            "\u2502  Source  : %-22s | Det.conf: %s | LLM.conf: %s\n"
+            "\u2502  RL      : profile=%-15s | decision=%-12s | q=%+.5f\n"
+            "\u2502  State   : %s\n"
+            "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            symbol, mode, side,
+            ep_fmt, quantity, amount_usdt,
+            balance_before, self.balance_usdt, db_id,
+            src_tag, det_str, llm_str,
+            rl_profile, rl_decision, rl_q,
+            rl_state,
+        )
         return True
 
     def add_to_position(self, symbol, price, amount_usdt, reason, mode=None):
@@ -168,6 +224,7 @@ class PaperTradingSimulator:
         profit = raw_profit - fee_cost
 
         revenue = (pos["quantity"] * pos["entry_price"]) + profit
+        balance_before = self.balance_usdt
         self.balance_usdt += revenue
         exit_time = datetime.now()
         hold_secs = int((exit_time - pos["entry_time"]).total_seconds())
@@ -180,10 +237,26 @@ class PaperTradingSimulator:
 
         save_portfolio_snapshot(self.balance_usdt, len(self.positions))
 
-        emoji = "✅" if profit >= 0 else "❌"
-        cp_fmt = f"${current_price:,.2f}" if current_price >= 1.0 else f"${current_price:.6f}"
+        ep_fmt = f"${pos['entry_price']:,.6f}" if pos['entry_price'] < 1.0 else f"${pos['entry_price']:,.2f}"
+        cp_fmt = f"${current_price:,.6f}" if current_price < 1.0 else f"${current_price:,.2f}"
+        pnl_pct = (profit / notional * 100) if notional > 0 else 0.0
+        pnl_emoji = "\u2705" if profit >= 0 else "\u274c"
         logger.info(
-            f"{emoji} CLOSED {side} {symbol} ({mode}) at {cp_fmt} | PnL: {pnl_str} | Held: {hold_secs}s | {reason}"
+            "%s TRADE EXIT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u2502  Symbol  : %-10s | Mode: %-8s | Side: %s\n"
+            "\u2502  Entry   : %-14s \u2192 Exit: %s\n"
+            "\u2502  Qty     : %.6f | Notional: $%.2f\n"
+            "\u2502  Raw PnL : %+.4f | Fee: -%.4f | Net PnL: %+.4f (%+.3f%%)\n"
+            "\u2502  Held    : %ds  | Reason  : %s\n"
+            "\u2502  Balance : $%.2f \u2192 $%.2f\n"
+            "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            pnl_emoji,
+            symbol, mode, side,
+            ep_fmt, cp_fmt,
+            pos["quantity"], notional,
+            raw_profit, fee_cost, profit, pnl_pct,
+            hold_secs, reason,
+            balance_before, self.balance_usdt,
         )
 
         return {

@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 import logger
-import reset_session
+from reset import reset_session
 import validation_gates
 
 
