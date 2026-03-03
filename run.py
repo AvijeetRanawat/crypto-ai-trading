@@ -1,6 +1,8 @@
 import asyncio
 import multiprocessing
 import os
+import socket
+import subprocess
 import time
 from datetime import datetime
 from typing import Dict, Tuple
@@ -80,12 +82,45 @@ def _start_children() -> Tuple[multiprocessing.Process, multiprocessing.Process]
     return p1, p2
 
 
+def _free_port(port: int, retries: int = 10, delay: float = 0.4) -> None:
+    """Kill any process holding *port* and wait until it is released."""
+    for _ in range(retries):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('', port))
+            s.close()
+            return  # port is free
+        except OSError:
+            s.close()
+            # Try to forcibly kill whatever holds the port.
+            try:
+                pids = subprocess.check_output(
+                    ['lsof', '-ti', f':{port}'], text=True
+                ).split()
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), 9)
+                    except ProcessLookupError:
+                        pass
+            except subprocess.CalledProcessError:
+                pass
+            time.sleep(delay)
+    logger.warning('Port %d may still be in use after cleanup attempts', port)
+
+
 def _stop_children(*procs: multiprocessing.Process):
     for p in procs:
         if p.is_alive():
             p.terminate()
     for p in procs:
         p.join(timeout=5)
+    # Force-kill any that still haven't stopped.
+    for p in procs:
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=2)
+    _free_port(8000)
 
 
 def _supervise(auto_restart: bool, root_dir: str):
@@ -150,7 +185,7 @@ if __name__ == "__main__":
 
     # ── Reset Session Data (only if RESET_ON_RESTART is set) ──
     if _env_bool("RESET_ON_RESTART", False):
-        from reset_session import reset_session
+        from reset.reset_session import reset_session
         reset_session()
     else:
         logger.info("Preserving previous session data (set RESET_ON_RESTART=true to clear).")
