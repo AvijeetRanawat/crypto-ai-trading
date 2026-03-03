@@ -19,6 +19,8 @@ from database import (
     get_runtime_context,
 )
 
+
+
 from strategies.momentum import MomentumAgent
 from strategies.swing import SwingAgent
 from strategies.trend import TrendAgent
@@ -81,7 +83,12 @@ class TradingEngine:
                     self.missed_analyzer = MissedOpportunityAnalyzer(bedrock_client, config.BEDROCK_MODEL_ID)
                 logger.info(f"✅ Engine initialized with LLM provider={self.llm_agent.provider} (profit-first mode)")
             else:
-                logger.error("LLM provider initialization failed.")
+                reason = getattr(self.llm_agent, '_init_error', None) if self.llm_agent else 'LLMAgent() returned None'
+                logger.error(
+                    "LLM provider initialization failed (provider=%s). Running in deterministic-only mode. Reason: %s",
+                    getattr(self.llm_agent, 'provider', config.LLM_PROVIDER),
+                    reason or 'ready=False after __init__ (check boto3/credential logs above)',
+                )
         except Exception as e:
             logger.error(f"Failed to load LLM: {e}")
 
@@ -1660,13 +1667,13 @@ class TradingEngine:
                 notional = max(1.0, notional)
                 pnl_usd = float(trade_result.get("pnl", 0.0) or 0.0)
                 pnl_reward = pnl_usd / notional
-                
+
                 # Apply reward multipliers: heavily favor wins, keep losses 1:1
                 if pnl_reward > 0:
                     pnl_reward *= float(rl_cfg("RL_PROFIT_REWARD_MULTIPLIER"))  # 3x boost for profits
                 elif pnl_reward < 0:
                     pnl_reward *= float(rl_cfg("RL_LOSS_PENALTY_MULTIPLIER"))  # 1x for losses
-                
+
                 hold_secs = float(trade_result.get("hold_secs", 0) or 0)
                 raw_opp_cost_penalty = float(rl_cfg("RL_OPEN_TRADE_COST_PENALTY")) * max(1.5, hold_secs / 180.0)
                 opp_cap = self._rl_loss_penalty_cap(pnl_reward / max(1.0, float(rl_cfg("RL_PROFIT_REWARD_MULTIPLIER")) if pnl_reward > 0 else 1.0))

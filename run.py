@@ -143,14 +143,16 @@ def _free_port(port: int, retries: int = 10, delay: float = 0.4) -> None:
 def _stop_children(*procs: multiprocessing.Process):
     for p in procs:
         if p.is_alive():
-            p.terminate()
+            p.terminate()  # SIGTERM — triggers graceful asyncio cancellation
+    # Give engine time to finish any in-flight DB writes (SIGTERM → CancelledError path).
     for p in procs:
-        p.join(timeout=5)
-    # Force-kill any that still haven't stopped.
+        p.join(timeout=15)
+    # Force-kill any that still haven't stopped after the grace period.
     for p in procs:
         if p.is_alive():
+            logger.warning("Process %s did not stop within grace period — sending SIGKILL.", p.pid)
             p.kill()
-            p.join(timeout=2)
+            p.join(timeout=3)
     _free_port(8000)
 
 

@@ -1,5 +1,6 @@
 import json
 import time
+import re
 import boto3
 import requests
 from strategies.base import BaseStrategy, Signal
@@ -31,6 +32,132 @@ def _strip_fences(text: str) -> str:
         if text.lower().startswith("json"):
             text = text[4:].strip()
     return text
+
+
+def _parse_json_object(text: str) -> dict:
+    """
+    Parse model output into a JSON object with light recovery:
+    - fenced blocks
+    - extra prose before/after the object
+    - trailing commas
+    """
+    cleaned = _strip_fences(text)
+    if not cleaned:
+        raise ValueError("empty LLM response")
+
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        snippet = cleaned[start:end + 1]
+    else:
+        snippet = cleaned
+    snippet = re.sub(r",(\s*[}\]])", r"\1", snippet)
+    try:
+        parsed = json.loads(snippet)
+        if not isinstance(parsed, dict):
+            raise ValueError("review payload was not a JSON object")
+        return parsed
+    except Exception:
+        # Best-effort fallback for partially malformed JSON-ish model output.
+        # First try to close any truncated string/object before the regex path.
+        closed = _close_truncated_json(snippet)
+        if closed != snippet:
+            try:
+                parsed = json.loads(closed)
+                if isinstance(parsed, dict) and parsed:
+                    return parsed
+            except Exception:
+                pass
+        recovered = _recover_review_payload(closed or snippet)
+        if recovered:
+            return recovered
+        raise
+
+
+def _close_truncated_json(text: str) -> str:
+    """
+    Best-effort closure of a JSON string that was cut off mid-stream.
+    Scans for unmatched open strings, braces, and brackets and appends the
+    minimum characters needed to make the document syntactically closeable.
+    Returns the (potentially modified) text; caller must still validate with
+    json.loads.
+    """
+    in_string = False
+    escape_next = False
+    depth = 0
+
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch in ("{", "["):
+                depth += 1
+            elif ch in ("}", "]"):
+                depth = max(0, depth - 1)
+
+    suffix = ""
+    if in_string:
+        suffix += '"'           # close the dangling string
+    suffix += "}" * depth       # close open objects (best-guess; all {)
+    return text + suffix if suffix else text
+
+
+def _recover_review_payload(text: str) -> dict:
+    body = (text or "").replace("\r", "")
+
+    # Prefer object-like section if present even when trailing brace is missing.
+    start = body.find("{")
+    if start >= 0:
+        body = body[start:]
+
+    verdict_m = re.search(r'["\']?verdict["\']?\s*:\s*["\']?([A-Za-z_]+)', body, re.IGNORECASE)
+    conf_m = re.search(r'["\']?confidence["\']?\s*:\s*([-+]?\d*\.?\d+)', body, re.IGNORECASE)
+    action_m = re.search(r'["\']?suggested_action["\']?\s*:\s*["\']?([A-Za-z_]+)', body, re.IGNORECASE)
+
+    reason = ""
+    reason_q = re.search(
+        r'["\']?reason["\']?\s*:\s*["\'](.*?)(?:(?<!\\)["\']\s*,|\n\s*["\']?[A-Za-z_]+["\']?\s*:|\n\}|$)',
+        body,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if reason_q:
+        reason = reason_q.group(1).strip().replace("\n", " ")
+    else:
+        reason_raw = re.search(
+            r'["\']?reason["\']?\s*:\s*([^,\n}]+)',
+            body,
+            re.IGNORECASE,
+        )
+        if reason_raw:
+            reason = reason_raw.group(1).strip().strip('"\'')
+
+    recovered = {}
+    if verdict_m:
+        recovered["verdict"] = verdict_m.group(1).upper()
+    if conf_m:
+        try:
+            recovered["confidence"] = float(conf_m.group(1))
+        except ValueError:
+            pass
+    if action_m:
+        recovered["suggested_action"] = action_m.group(1).upper()
+    if reason:
+        recovered["reason"] = reason
+
+    return recovered
 
 
 def _estimate_tokens(text: str) -> int:
@@ -72,6 +199,7 @@ class LLMAgent(BaseStrategy):
         self.weight = config.WEIGHT_LLM
         self.provider = config.LLM_PROVIDER
         self.ready = False
+        self._init_error: str | None = None
         self.cache_hits = 0
         self.haiku_rejects = 0
         self.bedrock = None
@@ -79,6 +207,7 @@ class LLMAgent(BaseStrategy):
 
         if self.provider == "OPENAI":
             if not self.openai_api_key:
+                self._init_error = "OPENAI_API_KEY not set"
                 logger.error("OPENAI provider selected but OPENAI_API_KEY is not set.")
                 return
             self.ready = True
@@ -90,6 +219,7 @@ class LLMAgent(BaseStrategy):
             self.ready = True
             logger.info(f"Initialized AWS Bedrock client for model: {config.BEDROCK_MODEL_ID}")
         except Exception as e:
+            self._init_error = str(e)
             logger.error(f"Failed to initialize boto3 Bedrock client: {e}")
             self.bedrock = None
 
@@ -327,11 +457,11 @@ Output strictly valid JSON (no markdown):
                 model_id=model_id,
                 stage="decision_review",
                 prompt=prompt,
-                max_tokens=180,
+                max_tokens=300,
                 temperature=0.1,
             )
             usage_events.append(usage_event)
-            result = json.loads(_strip_fences(llm_text))
+            result = _parse_json_object(llm_text)
             verdict = str(result.get("verdict", "NEUTRAL")).upper()
             review_conf = float(result.get("confidence", 0.0) or 0.0)
             rationale = str(result.get("reason", ""))

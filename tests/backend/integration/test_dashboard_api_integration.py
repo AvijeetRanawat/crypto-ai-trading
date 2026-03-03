@@ -118,3 +118,22 @@ def test_recent_trades_includes_open_positions(api_module, isolated_db):
     assert row_by_id[open_id]["status"] == "OPEN"
     assert closed_id in row_by_id
     assert row_by_id[closed_id]["status"] == "CLOSED"
+
+
+def test_recent_trades_does_not_hide_rows_from_other_runtime_session(api_module, isolated_db):
+    trade_id = database.save_trade(
+        symbol="SOLUSDT",
+        side="LONG",
+        price=120.0,
+        quantity=1.0,
+        entry_time=__import__("datetime").datetime.now(),
+        reason="cross session visibility",
+        session_id="different-session-id",
+        process_id=12345,
+        decision_source="SPOT_DETERMINISTIC",
+        deterministic_conf=0.66,
+    )
+
+    rows = asyncio.run(api_module.get_trades())
+    row_by_id = {r["id"]: r for r in rows}
+    assert trade_id in row_by_id

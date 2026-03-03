@@ -1,9 +1,14 @@
 import requests
 import asyncio
 import time
+import certifi
 from config import config
 from logger import logger
 import database
+
+# Use the venv-local cert bundle regardless of any stale REQUESTS_CA_BUNDLE /
+# SSL_CERT_FILE shell exports that may point at a non-existent path.
+_CERTIFI_BUNDLE = certifi.where()
 
 
 def _safe_float(value, default=0.0):
@@ -56,7 +61,7 @@ class CoinDCXClient:
         """GET request with exponential backoff."""
         for attempt in range(retries):
             try:
-                response = requests.get(url, timeout=timeout, headers=self.headers)
+                response = requests.get(url, timeout=timeout, headers=self.headers, verify=_CERTIFI_BUNDLE)
                 response.raise_for_status()
                 return response.json()
             except (requests.exceptions.ConnectionError,

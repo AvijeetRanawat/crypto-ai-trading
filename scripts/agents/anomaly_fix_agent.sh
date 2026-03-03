@@ -22,6 +22,12 @@ fi
 
 mkdir -p "$ROOT_DIR/data"
 
+# Stability defaults for unattended cron runs:
+# - force MLX off (avoids known Python/Metal aborts in headless cron contexts)
+export ENABLE_MLX_RL_AGENT="${ENABLE_MLX_RL_AGENT:-false}"
+export DISABLE_MLX="${DISABLE_MLX:-1}"
+export MLX_USE_GPU="${MLX_USE_GPU:-0}"
+
 echo "[agent] Building anomaly context report..."
 .venv/bin/python scripts/agents/build_anomaly_context.py \
   --log "$LOG_FILE" \

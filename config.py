@@ -1,7 +1,25 @@
 import os
 from dotenv import load_dotenv
+from logger import logger
 
 load_dotenv()
+
+
+def _sanitize_tls_env() -> None:
+    """
+    Remove invalid TLS CA bundle env vars to prevent requests/botocore failures
+    when a stale venv path is exported in the shell.
+    """
+    for key in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
+        value = (os.getenv(key) or "").strip()
+        if not value:
+            continue
+        if not os.path.isfile(value):
+            os.environ.pop(key, None)
+            logger.warning("Ignoring invalid %s path: %s", key, value)
+
+
+_sanitize_tls_env()
 
 
 def _env_bool(name: str, default: bool) -> bool:

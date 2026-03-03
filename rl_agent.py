@@ -7,11 +7,29 @@ from datetime import datetime
 import config
 from logger import logger
 
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    import mlx.optimizers as optim
-except Exception:
+_ENABLE_MLX_ENV = str(os.getenv("ENABLE_MLX_RL_AGENT", "false")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_DISABLE_MLX_ENV = str(os.getenv("DISABLE_MLX", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+if _ENABLE_MLX_ENV and not _DISABLE_MLX_ENV:
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        import mlx.optimizers as optim
+    except Exception:
+        mx = None
+        nn = None
+        optim = None
+else:
     mx = None
     nn = None
     optim = None
