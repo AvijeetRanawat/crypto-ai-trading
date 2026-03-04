@@ -235,9 +235,8 @@ async def get_trades():
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
-        WHERE entry_time >= ?
-        ORDER BY id DESC LIMIT 50
-    """, (SESSION_START,))
+        ORDER BY id DESC LIMIT 100
+    """)
     rows = cur.fetchall()
     conn.close()
     return [
@@ -271,13 +270,12 @@ async def get_portfolio_summary():
     conn = _db()
     cur = conn.cursor()
 
-    # Session closed trades
+    # All-time closed trades (PnL is cumulative across restarts/sessions)
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
-        WHERE status='CLOSED' AND entry_time >= ?
-        AND (session_id = ? OR session_id IS NULL)
-    """, (SESSION_START, SESSION_ID))
+        WHERE status='CLOSED'
+    """)
     closed = cur.fetchall()
 
     wins = [t for t in closed if (t[8] or 0) > 0]
@@ -492,9 +490,11 @@ async def get_market_history(symbol: str = "BTCUSDT"):
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT timestamp, price FROM prices
-        WHERE symbol=? AND timestamp >= ?
-        ORDER BY timestamp ASC LIMIT 500
+        SELECT timestamp, price FROM (
+            SELECT timestamp, price FROM prices
+            WHERE symbol=? AND timestamp >= ?
+            ORDER BY timestamp DESC LIMIT 1000
+        ) ORDER BY timestamp ASC
     """, (symbol, SESSION_START))
     rows = cur.fetchall()
     conn.close()

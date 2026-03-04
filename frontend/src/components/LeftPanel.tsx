@@ -88,6 +88,7 @@ export function LeftPanel({
   const buySeriesRef = useRef<HistogramSeriesApi | null>(null);
   const sellSeriesRef = useRef<HistogramSeriesApi | null>(null);
   const perfChartRef = useRef<Chart<"bar"> | null>(null);
+  const lastPriceTimeRef = useRef<number>(0);
 
   const priceContainerRef = useRef<HTMLDivElement | null>(null);
   const signalContainerRef = useRef<HTMLDivElement | null>(null);
@@ -213,11 +214,12 @@ export function LeftPanel({
       signalChartRef.current = null;
       buySeriesRef.current = null;
       sellSeriesRef.current = null;
+      lastPriceTimeRef.current = 0;
     };
   }, []);
 
   useEffect(() => {
-    if (!priceSeriesRef.current || !marketHistory.length) return;
+    if (!priceSeriesRef.current || !priceChartRef.current || !marketHistory.length) return;
 
     const series = marketHistory
       .map((point) => ({
@@ -230,8 +232,30 @@ export function LeftPanel({
     const deduped = new Map<number, { time: UTCTimestamp; value: number }>();
     series.forEach((point) => deduped.set(Number(point.time), point));
     const unique = Array.from(deduped.values());
+    if (!unique.length) return;
 
-    if (unique.length) priceSeriesRef.current.setData(unique);
+    const isFirstLoad = lastPriceTimeRef.current === 0;
+
+    if (isFirstLoad) {
+      // Initial load: set all data then fit the viewport to actual data bounds.
+      // fitContent() is deferred one animation frame so the chart container has
+      // its final layout dimensions before the time scale is adjusted.
+      priceSeriesRef.current.setData(unique);
+      lastPriceTimeRef.current = Number(unique[unique.length - 1].time);
+      const chart = priceChartRef.current;
+      requestAnimationFrame(() => {
+        chart?.timeScale().fitContent();
+      });
+    } else {
+      // Subsequent polls: push only new points.
+      // lightweight-charts update() auto-advances the right edge when the
+      // chart is already at the latest bar, so no explicit scrolling needed.
+      const newPoints = unique.filter((p) => Number(p.time) > lastPriceTimeRef.current);
+      if (newPoints.length > 0) {
+        newPoints.forEach((p) => priceSeriesRef.current!.update(p));
+        lastPriceTimeRef.current = Number(newPoints[newPoints.length - 1].time);
+      }
+    }
   }, [marketHistory]);
 
   useEffect(() => {
