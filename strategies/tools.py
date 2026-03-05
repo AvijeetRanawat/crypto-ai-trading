@@ -832,11 +832,10 @@ class MarketRegimeDetector:
             prices[-1] < prices[-10],
         ])
 
-        if efficiency < config.CHOPPY_EFFICIENCY_THRESHOLD:
-            regime = "CHOPPY"
-            verdict = f"CHOPPY — Market oscillating ({efficiency:.2%} efficiency). Trade only high-conviction setups."
-            direction = "ANY"  # Let downstream choppy-override gate decide, not a hard block
-        elif bull_signals >= 2:
+        # EMA trend takes priority over short-window efficiency.
+        # A 30-tick micro window will always look choppy even during a strong 3-day trend
+        # because price oscillates per tick. Only classify CHOPPY when EMAs give no direction.
+        if bull_signals >= 2:
             regime = "BULL"
             verdict = f"BULL — EMA20({ema20:,.0f}) > EMA50({ema50:,.0f}). Take LONG only. Strength: {efficiency:.2%}"
             direction = "LONG"
@@ -844,6 +843,10 @@ class MarketRegimeDetector:
             regime = "BEAR"
             verdict = f"BEAR — EMA20({ema20:,.0f}) < EMA50({ema50:,.0f}). Take SHORT only. Strength: {efficiency:.2%}"
             direction = "SHORT"
+        elif efficiency < config.CHOPPY_EFFICIENCY_THRESHOLD:
+            regime = "CHOPPY"
+            verdict = f"CHOPPY — Market oscillating ({efficiency:.2%} efficiency). Trade only high-conviction setups."
+            direction = "ANY"  # Let downstream choppy-override gate decide, not a hard block
         else:
             regime = "NEUTRAL"
             verdict = f"NEUTRAL — Mixed signals. Require higher confidence."
@@ -950,10 +953,14 @@ class MultiTimeframeConfirmer:
         mid = (c2["high"] + c2["low"]) / 2
         price_vs_mid = "ABOVE" if prices[-1] > mid else "BELOW"
 
+        # Trend alignment is the primary gate. price_vs_mid is informational only —
+        # requiring it as a hard condition incorrectly blocks valid pullback entries
+        # in a trending market (e.g. BTC at $70k pullback during $69k→$74k bull hour).
+        # RSI/BB/regime already handle overbought/oversold protection separately.
         confirms = (
-            (proposed_direction == "LONG"  and htf_trend in ("BULL", "FLAT") and price_vs_mid == "ABOVE") or
-            (proposed_direction == "SHORT" and htf_trend in ("BEAR", "FLAT") and price_vs_mid == "BELOW") or
-            htf_trend == "FLAT"  # Flat = no contradiction
+            (proposed_direction == "LONG"  and htf_trend in ("BULL", "FLAT")) or
+            (proposed_direction == "SHORT" and htf_trend in ("BEAR", "FLAT")) or
+            htf_trend == "FLAT"
         )
 
         verdict = (

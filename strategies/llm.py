@@ -16,11 +16,13 @@ _response_cache: dict = {}
 _CACHE_TTL_SECONDS = 120
 _CACHE_MAX_SIZE = 256  # Prevent unbounded growth
 
-def _cache_key(rsi, macd, bb_pct, buy_votes, sell_votes, regime):
+def _cache_key(rsi, macd, bb_pct, buy_votes, sell_votes, regime, velocity_1m=0.0):
     """A lightweight representation of the current market state."""
     rsi_tier = "LOW" if rsi < 35 else ("HIGH" if rsi > 65 else "MID")
     bb_zone = "BELOW" if bb_pct < 20 else ("ABOVE" if bb_pct > 80 else "MID")
-    return (rsi_tier, str(macd), bb_zone, buy_votes, sell_votes, regime)
+    # Bucket velocity so fast-moving markets don't reuse stale cache entries
+    vel_tier = "FAST+" if velocity_1m > 0.05 else ("FAST-" if velocity_1m < -0.05 else "SLOW")
+    return (rsi_tier, str(macd), bb_zone, buy_votes, sell_votes, regime, vel_tier)
 
 
 def _strip_fences(text: str) -> str:
@@ -458,10 +460,16 @@ class LLMAgent(BaseStrategy):
         total_vote_weight: float,
         tool_outputs: list,
         policy_verdict: str,
+        lessons_ctx: str = "",
     ) -> tuple:
         usage_events = []
         if not self.ready:
             return None, usage_events
+
+        # Build lessons context if caller didn't provide one, so the critic
+        # always has access to distilled rules and recent self-corrections
+        if not lessons_ctx:
+            lessons_ctx = self._build_lessons_context()
 
         tool_block = "\n".join([f"  - {t['name']}: {t['data']}" for t in tool_outputs])
         prompt = f"""You are a risk-aware trading critic. Review the proposed decision and decide whether to SUPPORT it or OPPOSE it.
@@ -490,7 +498,7 @@ Total Weight: {total_vote_weight:.2f}
 <TOOLS>
 {tool_block}
 </TOOLS>
-
+{lessons_ctx}
 Output strictly valid JSON (no markdown):
 {{
   "verdict": "SUPPORT" | "OPPOSE" | "NEUTRAL",
@@ -600,7 +608,9 @@ Output strictly valid JSON (no markdown):
         if not self.ready or len(history) < 2:
             return Signal("NEUTRAL", 0.0, self.weight, "LLM not ready.", meta={"llm_usage": usage_events})
 
-        key = _cache_key(rsi, macd, bb_pct, buy_count, sell_count, regime)
+        # Include velocity in cache key so fast-moving markets don't reuse stale NEUTRAL hits
+        velocity_1m = ((current_price - history[-2]) / history[-2]) * 100 if len(history) >= 2 and history[-2] else 0.0
+        key = _cache_key(rsi, macd, bb_pct, buy_count, sell_count, regime, velocity_1m)
         if key in _response_cache:
             cached_signal, cached_time = _response_cache[key]
             age = time.time() - cached_time
@@ -647,7 +657,11 @@ Output strictly valid JSON (no markdown):
             [
                 t["data"]
                 for t in tool_outputs
-                if t["name"] in ("RSI (14)", "MACD Signal", "Bollinger Bands", "Support & Resistance", "Candle Patterns")
+                if t["name"] in (
+                    "RSI (14)", "MACD Signal", "Bollinger Bands",
+                    "Support & Resistance", "Candle Patterns",
+                    "Stochastic RSI", "EMA Cross (9/21)", "Volume Momentum",
+                )
             ]
         )
 
