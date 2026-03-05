@@ -550,7 +550,7 @@ async def get_logs(lines: int = 120):
 
 @app.get("/api/signals/history")
 async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
-    """Signal events — session only."""
+    """Signal events — all-time, most recent first."""
     conn = _db()
     cur = conn.cursor()
     signal_cols = _table_columns(cur, "signal_events")
@@ -569,10 +569,10 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
         f"""
         SELECT {", ".join(select_fields)}
         FROM signal_events
-        WHERE symbol=? AND timestamp >= ? AND (session_id = ? OR session_id IS NULL)
+        WHERE symbol=?
         ORDER BY id DESC LIMIT ?
         """,
-        (symbol, SESSION_START, SESSION_ID, limit),
+        (symbol, limit),
     )
     rows = cur.fetchall()
     conn.close()
