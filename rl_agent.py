@@ -576,6 +576,169 @@ class RLWeightAgent:
                 self._unsaved_updates = 0
 
 
+class TradeGateAgent:
+    """
+    Contextual bandit that learns TRADE vs SKIP for each (mode, state).
+
+    State: side × regime × vote × edge × session  (≤324 buckets).
+    Actions: "TRADE" or "SKIP".
+    Reward: normalised PnL on TRADE; 0 on SKIP (counterfactual unknown).
+
+    Cold states (n_trade < cold_threshold) always allow trades through so the
+    agent can collect real-outcome data.  Once a state is warm, Q(TRADE) vs
+    Q(SKIP) decides.  This replaces the old `force_entry` mechanism entirely:
+    instead of firing random overrides, the gate starts permissive then
+    self-tightens as evidence accumulates per state.
+
+    The key correctness guarantee:
+        - Only TRADE actions receive PnL rewards → Q(TRADE) measures real PnL.
+        - SKIP actions receive reward=0 → Q(SKIP) converges toward 0.
+        - The gate blocks when Q(TRADE) < Q(SKIP), i.e. trading hurts on average.
+    """
+
+    def __init__(
+        self,
+        state_file: str = "data/gate_weights.json",
+        learning_rate: float = 0.10,
+        cold_threshold: int = 5,
+    ):
+        self.state_file = str(state_file)
+        self.lr = float(learning_rate)
+        self.cold_threshold = int(cold_threshold)
+        self._lock = threading.RLock()
+        self.q: dict = {}   # {mode: {state_key: {"TRADE": q, "SKIP": q}}}
+        self.n: dict = {}   # {mode: {state_key: {"TRADE": n, "SKIP": n}}}
+        self._load()
+
+    # ── State bucketing ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def make_state_key(
+        side: str,
+        regime: str,
+        vote_imbalance: float,
+        edge_pct: float,
+        session: str,
+    ) -> str:
+        """Compact, human-readable state key.  ~324 possible values."""
+        side_b = str(side or "ANY").upper()[:5]
+        reg_b  = str(regime or "UNK").upper()[:6]
+        vote_b = "strong" if vote_imbalance >= 0.5 else ("mid" if vote_imbalance >= 0.25 else "weak")
+        edge_b = "pos" if edge_pct > 0.05 else ("flat" if edge_pct >= 0.0 else "neg")
+        sess_b = str(session or "LOW").upper()[:3]
+        return f"side={side_b}|r={reg_b}|v={vote_b}|e={edge_b}|s={sess_b}"
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, "r") as fh:
+                    data = json.load(fh)
+                self.q = data.get("q", {})
+                self.n = data.get("n", {})
+                n_states = sum(len(v) for v in self.q.values())
+                logger.info(
+                    "TradeGateAgent loaded: %d modes, %d states",
+                    len(self.q), n_states,
+                )
+        except Exception as exc:
+            logger.warning("TradeGateAgent load failed: %s", exc)
+
+    def _save(self) -> None:
+        try:
+            tmp = self.state_file + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(
+                    {
+                        "q": self.q,
+                        "n": self.n,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    fh,
+                    indent=2,
+                )
+            os.replace(tmp, self.state_file)
+        except Exception as exc:
+            logger.warning("TradeGateAgent save failed: %s", exc)
+
+    # ── Core API ──────────────────────────────────────────────────────────────
+
+    def get_n_trade(self, mode: str, state_key: str) -> int:
+        """How many TRADE outcomes have been observed for this (mode, state)."""
+        return int(
+            self.n.get(str(mode).upper(), {})
+            .get(state_key, {})
+            .get("TRADE", 0) or 0
+        )
+
+    def should_trade(
+        self,
+        mode: str,
+        state_key: str,
+        cold_threshold: int | None = None,
+    ) -> tuple[bool, str]:
+        """
+        Returns (ok_to_trade: bool, reason: str).
+
+        Cold state  → always True  (need data).
+        Warm state  → True only if Q(TRADE) >= Q(SKIP).
+        """
+        mode = str(mode).upper()
+        threshold = int(cold_threshold if cold_threshold is not None else self.cold_threshold)
+        with self._lock:
+            q_s = self.q.setdefault(mode, {}).setdefault(
+                state_key, {"TRADE": 0.0, "SKIP": 0.0}
+            )
+            n_s = self.n.setdefault(mode, {}).setdefault(
+                state_key, {"TRADE": 0, "SKIP": 0}
+            )
+            n_trade = int(n_s.get("TRADE", 0))
+            if n_trade < threshold:
+                return True, f"cold(n={n_trade}/{threshold})"
+            q_trade = float(q_s.get("TRADE", 0.0))
+            q_skip  = float(q_s.get("SKIP",  0.0))
+            if q_trade >= q_skip:
+                return True, f"gate_ok(Q_T={q_trade:+.4f} Q_S={q_skip:+.4f})"
+            return False, f"gate_block(Q_T={q_trade:+.4f} Q_S={q_skip:+.4f})"
+
+    def update(
+        self,
+        mode: str,
+        state_key: str,
+        action: str,
+        reward: float,
+    ) -> None:
+        """
+        Online Q-learning update.
+        Call with action="TRADE" + realized PnL reward when a trade closes.
+        Call with action="SKIP"  + reward=0 when a warm gate blocks a trade.
+        """
+        mode   = str(mode).upper()
+        action = str(action).upper()
+        if action not in {"TRADE", "SKIP"}:
+            return
+        if not state_key:
+            return
+        reward = float(reward or 0.0)
+        with self._lock:
+            q_s = self.q.setdefault(mode, {}).setdefault(
+                state_key, {"TRADE": 0.0, "SKIP": 0.0}
+            )
+            n_s = self.n.setdefault(mode, {}).setdefault(
+                state_key, {"TRADE": 0, "SKIP": 0}
+            )
+            n = int(n_s.get(action, 0))
+            alpha = self.lr / (1.0 + n * 0.02)   # decaying LR
+            old_q = float(q_s.get(action, 0.0))
+            new_q = old_q + alpha * (reward - old_q)
+            q_s[action] = round(new_q, 8)
+            n_s[action] = n + 1
+            logger.info(
+                "GATE_UPDATE mode=%s action=%s reward=%+.5f  Q: %.5f→%.5f  n=%d  state=%s",
+                mode, action, reward, old_q, new_q, n + 1, state_key,
+            )
+            self._save()
 
 
 class MLXWeightAgent:

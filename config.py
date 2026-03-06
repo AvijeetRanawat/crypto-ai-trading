@@ -145,6 +145,12 @@ class Config:
     RL_FORCE_ENTRY_SKIP_STREAK = _env_int("RL_FORCE_ENTRY_SKIP_STREAK", 8)
     RL_FORCE_ENTRY_MAX_TRADES = _env_int("RL_FORCE_ENTRY_MAX_TRADES", 75)
     RL_FORCE_ENTRY_MIN_EDGE_PCT = _env_float("RL_FORCE_ENTRY_MIN_EDGE_PCT", 0.0015)
+    RL_FORCE_ENTRY_MIN_STRATEGY_SCORE = _env_float("RL_FORCE_ENTRY_MIN_STRATEGY_SCORE", 0.15)
+    RL_FORCE_ENTRY_MIN_VOTE_IMBALANCE = _env_float("RL_FORCE_ENTRY_MIN_VOTE_IMBALANCE", 0.15)
+    # ── TradeGateAgent — TRADE vs SKIP contextual bandit ─────────────────────
+    RL_GATE_WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), "data", "gate_weights.json")
+    GATE_COLD_THRESHOLD = _env_int("GATE_COLD_THRESHOLD", 5)   # states below this are explored freely
+    GATE_LEARNING_RATE  = _env_float("GATE_LEARNING_RATE", 0.10)
     RL_SKIP_PENALTY_WARMUP_UPDATES = _env_int("RL_SKIP_PENALTY_WARMUP_UPDATES", 120)
     RL_SKIP_PENALTY_WARMUP_SCALE = _env_float("RL_SKIP_PENALTY_WARMUP_SCALE", 0.35)
     RL_SKIP_PENALTY_LOW_TRADE_SCALE = _env_float("RL_SKIP_PENALTY_LOW_TRADE_SCALE", 0.50)

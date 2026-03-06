@@ -36,7 +36,7 @@ from strategies.tools import (
 )
 import sys
 from news_sentiment import build_sentiment_snapshot
-from rl_agent import RLWeightAgent, MLXWeightAgent, is_mlx_available
+from rl_agent import RLWeightAgent, MLXWeightAgent, TradeGateAgent, is_mlx_available
 from engine_simulator import PaperTradingSimulator
 from engine_rl_helpers import (
     rl_infer,
@@ -131,6 +131,11 @@ class TradingEngine:
                 epsilon_decay=float(config.RL_EPSILON_DECAY),
                 learning_rate=float(config.RL_LEARNING_RATE),
             )
+        self.gate_agent = TradeGateAgent(
+            state_file=config.RL_GATE_WEIGHTS_FILE,
+            learning_rate=float(config.GATE_LEARNING_RATE),
+            cold_threshold=int(config.GATE_COLD_THRESHOLD),
+        )
         self._pending_rl_by_symbol = {}
         self.policy_executor = ThreadPoolExecutor(
             max_workers=max(1, len(self.parallel_products)),
@@ -172,12 +177,9 @@ class TradingEngine:
             executed < int(rl_cfg("RL_MIN_TRADES_BEFORE_STRICT_GATES"))
             or closed < int(rl_cfg("RL_MIN_CLOSED_TRADES_BEFORE_STRICT_GATES"))
         )
-        force_entry = (
-            bool(rl_cfg("RL_FORCE_ENTRY_ON_SKIP_STREAK"))
-            and under_sampled
-            and skip_streak >= int(rl_cfg("RL_FORCE_ENTRY_SKIP_STREAK"))
-            and executed < int(rl_cfg("RL_FORCE_ENTRY_MAX_TRADES"))
-        )
+        # force_entry is permanently disabled — TradeGateAgent handles
+        # exploration organically via cold-state permissiveness.
+        force_entry = False
         return {
             "mode": active_mode,
             "executed": executed,
@@ -481,10 +483,6 @@ class TradingEngine:
         calls_last_hour = get_llm_call_count_last_hour()
         if calls_last_hour >= config.LLM_MAX_CALLS_PER_HOUR:
             return False, f"LLM hourly cap reached ({calls_last_hour}/{config.LLM_MAX_CALLS_PER_HOUR})"
-
-        spend_today = get_llm_cost_today()
-        if spend_today >= config.LLM_DAILY_BUDGET_USD:
-            return False, f"LLM daily budget reached (${spend_today:.2f}/${config.LLM_DAILY_BUDGET_USD:.2f})"
 
         return True, ""
 
@@ -1543,10 +1541,6 @@ class TradingEngine:
         if drawdown >= config.MAX_DAILY_DRAWDOWN_USD:
             return True, f"Kill-switch: drawdown ${drawdown:.2f} >= ${config.MAX_DAILY_DRAWDOWN_USD:.2f}"
 
-        spend_today = get_llm_cost_today()
-        if spend_today >= config.LLM_DAILY_BUDGET_USD:
-            return True, f"Kill-switch: LLM budget exceeded (${spend_today:.2f})"
-
         max_cons = max(self.consecutive_losses.get(m, 0) for m in ("SPOT", "FUTURES", "OPTIONS"))
         if max_cons >= config.MAX_CONSECUTIVE_LOSSES:
             return True, f"Kill-switch: consecutive losses {max_cons}"
@@ -1711,6 +1705,10 @@ class TradingEngine:
                 reward = pnl_reward - opp_cost_penalty
                 self.rl_agent.update(rl_mode, rl_state_key, rl_profile_id, reward)
                 self.rl_updates_by_mode[rl_mode] = int(self.rl_updates_by_mode.get(rl_mode, 0) or 0) + 1
+                # Gate agent: reward the TRADE action with the same normalised PnL
+                _gate_sk = str(rl_ctx.get("gate_state_key", "") or "")
+                if _gate_sk:
+                    self.gate_agent.update(rl_mode, _gate_sk, "TRADE", reward)
                 self.rl_trade_rewards_by_mode[rl_mode] = int(self.rl_trade_rewards_by_mode.get(rl_mode, 0) or 0) + 1
                 save_rl_event(
                     mode=rl_mode,
@@ -2216,10 +2214,11 @@ class TradingEngine:
                         elif buy_count >= dir_threshold and buy_count >= sell_count:
                             proposed_dir = "LONG"
                         else:
-                            if force_entry:
+                            _force_vote_imb = abs(buy_count - sell_count) / max(total_vote_weight, 1.0)
+                            if force_entry and regime != "CHOPPY" and _force_vote_imb >= float(rl_cfg("RL_FORCE_ENTRY_MIN_VOTE_IMBALANCE")):
                                 proposed_dir = "LONG" if buy_count >= sell_count else "SHORT"
                                 intent(
-                                    f"⚡ Exploration override [{active_mode}]: forcing {proposed_dir} despite low directional edge.",
+                                    f"⚡ Exploration override [{active_mode}]: forcing {proposed_dir} (vote_imb={_force_vote_imb:.2f}) despite low directional edge.",
                                     [symbol],
                                 )
                             else:
@@ -2247,7 +2246,8 @@ class TradingEngine:
                         det_action, det_conf, det_reason = self._deterministic_decision(buy_count, sell_count, total_vote_weight)
                         deterministic_dir = "LONG" if det_action == "BUY" else ("SHORT" if det_action == "SELL" else "NEUTRAL")
                         if det_action == "NEUTRAL":
-                            if force_entry:
+                            _force_vote_imb_det = abs(buy_count - sell_count) / max(total_vote_weight, 1.0)
+                            if force_entry and regime != "CHOPPY" and _force_vote_imb_det >= float(rl_cfg("RL_FORCE_ENTRY_MIN_VOTE_IMBALANCE")):
                                 det_action = "BUY" if proposed_dir == "LONG" else "SELL"
                                 det_conf = max(float(det_conf or 0.0), 0.51)
                                 det_reason = f"{det_reason} | exploration_override"
@@ -2843,9 +2843,11 @@ class TradingEngine:
                         )
                         self._log_product_eval(symbol, "pre-llm", pre_policy, mode=active_mode)
                         if not bool((pre_policy or {}).get("allow")):
-                            if force_entry:
+                            _pre_score = float((pre_policy or {}).get("composite_score", 0))
+                            _min_score = float(rl_cfg("RL_FORCE_ENTRY_MIN_STRATEGY_SCORE"))
+                            if force_entry and _pre_score >= _min_score:
                                 intent(
-                                    f"⚡ Exploration override [{active_mode}]: bypassing pre-policy reject (score={pre_policy.get('composite_score', 0):.3f}) for sample collection.",
+                                    f"⚡ Exploration override [{active_mode}]: bypassing pre-policy reject (score={_pre_score:.3f} >= min={_min_score:.3f}) for sample collection.",
                                     [symbol],
                                 )
                             else:
@@ -2894,13 +2896,10 @@ class TradingEngine:
                         if borderline_setup:
                             llm_ok, llm_reason = self._llm_budget_ok()
                             if not llm_ok:
-                                # Fall back to deterministic trading instead of
-                                # skipping entirely — the setup already passed
-                                # all gates, so trade with reduced confidence.
-                                intent(f"⏳ LLM budget hit — using deterministic signal: {llm_reason}", [symbol])
+                                # Hourly rate cap hit — fall back to deterministic
                                 borderline_setup = False
                                 final_conf = max(0.55, det_conf * 0.85)
-                                final_reason = f"Deterministic (LLM budget): {det_reason}"
+                                final_reason = f"Deterministic (LLM cap): {det_reason}"
                                 decision_source = "DETERMINISTIC_LLM_FALLBACK"
 
                         if borderline_setup:
@@ -3095,6 +3094,44 @@ class TradingEngine:
                                 continue
                         selected_mode, policy_eval = active_mode, post_policy
 
+                        # ── TradeGateAgent: TRADE vs SKIP decision ──────────
+                        _gate_state = TradeGateAgent.make_state_key(
+                            side=final_dir,
+                            regime=regime,
+                            vote_imbalance=vote_imbalance_raw,
+                            edge_pct=baseline_edge_pct,
+                            session=session_filt.get("quality", "LOW"),
+                        )
+                        _gate_ok, _gate_reason = self.gate_agent.should_trade(
+                            active_mode,
+                            _gate_state,
+                            cold_threshold=int(rl_cfg("GATE_COLD_THRESHOLD") if rl_cfg("GATE_COLD_THRESHOLD") else config.GATE_COLD_THRESHOLD),
+                        )
+                        # Inject gate state key so the close handler can reward it
+                        rl_vote_inf["gate_state_key"] = _gate_state
+                        if not _gate_ok:
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            # Warm gate blocked — record SKIP with neutral reward
+                            self.gate_agent.update(active_mode, _gate_state, "SKIP", 0.0)
+                            intent(
+                                f"🧠 Gate blocked [{active_mode}] {_gate_reason} — not trading.",
+                                [symbol],
+                            )
+                            save_signal_event(
+                                symbol, current_price,
+                                raw_buy_count, raw_sell_count,
+                                buy_count, sell_count, total_vote_weight,
+                                rsi_result["rsi"], macd_result["crossover"],
+                                bb_result["position_pct"], "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "GATE_BLOCK"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                                llm_cost_usd=llm_cost,
+                                llm_tokens=llm_tokens,
+                            )
+                            continue
+                        logger.info("GATE_ALLOW [%s] %s  state=%s", active_mode, _gate_reason, _gate_state)
+
                         # ── LLM decision review (support vs oppose) ─────────
                         if (
                             config.ENABLE_LLM_DECISION_REVIEW
@@ -3172,6 +3209,54 @@ class TradingEngine:
                             product_score = float(policy_eval.get("composite_score", 0.0) or 0.0)
                             product_strategy = str(policy_eval.get("recommended_strategy", "N/A"))
                             pos_usdt = int(pos_usdt * float(policy_eval.get("size_multiplier", 1.0) or 1.0))
+
+                        # Block exploration when strategy has zero conviction
+                        _min_exp_score = float(rl_cfg("RL_FORCE_ENTRY_MIN_STRATEGY_SCORE"))
+                        if (
+                            force_entry
+                            and selected_mode in {"FUTURES", "OPTIONS", "SPOT"}
+                            and product_score is not None
+                            and product_score < _min_exp_score
+                        ):
+                            self.skipped_cycles_by_mode[active_mode] += 1
+                            intent(
+                                f"🚫 Exploration blocked [{active_mode}]: strategy score {product_score:.3f} < min {_min_exp_score:.2f}"
+                                f" ({product_strategy}) — no conviction to explore.",
+                                [symbol],
+                            )
+                            save_signal_event(
+                                symbol,
+                                current_price,
+                                raw_buy_count,
+                                raw_sell_count,
+                                buy_count,
+                                sell_count,
+                                total_vote_weight,
+                                rsi_result["rsi"],
+                                macd_result["crossover"],
+                                bb_result["position_pct"],
+                                "SKIPPED",
+                                decision_source=self._mode_decision_source(active_mode, "EXPLORE_NO_CONVICTION"),
+                                deterministic_action=deterministic_dir,
+                                deterministic_conf=det_conf,
+                                llm_cost_usd=llm_cost,
+                                llm_tokens=llm_tokens,
+                            )
+                            self._rl_penalize_skip(
+                                mode=active_mode,
+                                reason="explore_no_conviction",
+                                expected_edge_pct=baseline_edge_pct,
+                                symbol=symbol,
+                                regime_result=regime_result,
+                                session_filt=session_filt,
+                                vol_result=vol_result,
+                                sentiment_snapshot=sentiment_snapshot,
+                                buy_count=buy_count,
+                                sell_count=sell_count,
+                                total_vote_weight=total_vote_weight,
+                                rl_context=rl_vote_inf,
+                            )
+                            continue
 
                         # Exploration trades use smaller size to gather more data with less risk
                         if force_entry:
