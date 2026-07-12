@@ -1,6 +1,7 @@
 import requests
 import asyncio
 import time
+from datetime import datetime
 from config import config
 from logger import logger
 import database
@@ -18,6 +19,7 @@ class CoinDCXClient:
             'X-Auth-Apikey': config.API_KEY,
         }
         self._drift_alerted = set()
+        self.last_feed_update = None
 
     def _get_with_retry(self, url, retries=3, timeout=20):
         """GET request with exponential backoff."""
@@ -75,7 +77,7 @@ class CoinDCXClient:
             dropped = sorted(requested - set(self.monitored_channels))
             if dropped:
                 logger.warning(f"Dropped non-allowlisted channels: {dropped}")
-        logger.info(f"Starting Price Feed ({config.POLL_INTERVAL_SECONDS}s interval)...")
+        logger.info(f"Starting Price Feed ({config.PRICE_FEED_INTERVAL_SECONDS}s interval)...")
         while True:
             try:
                 tickers = self.get_market_ticker()
@@ -96,6 +98,7 @@ class CoinDCXClient:
                             if last_price <= 0:
                                 continue
                             self.latest_prices[market] = last_price
+                            self.last_feed_update = datetime.now()
                             database.save_price(market, last_price)
                             
                             # ── POPULATE TICKER META (was missing!) ──
@@ -108,7 +111,7 @@ class CoinDCXClient:
                                 'ask': float(t.get('ask', 0)),
                                 'timestamp': t.get('timestamp', ''),
                             }
-                await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+                await asyncio.sleep(config.PRICE_FEED_INTERVAL_SECONDS)
             except Exception as e:
                 logger.error(f"Price feed error: {e}. Retrying in 10s...")
                 await asyncio.sleep(10)

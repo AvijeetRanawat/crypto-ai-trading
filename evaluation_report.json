@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-02-27T14:30:57.730362",
+  "session_id": "20260227T134331",
+  "decision": "NO_GO",
+  "metrics": {
+    "runtime_hours": 0.7907582911111111,
+    "engine_errors": 0,
+    "llm_cost_usd": 0.0,
+    "gross_positive_pnl_usd": 0.0,
+    "llm_to_gross_positive_pnl_pct": null,
+    "closed_trades": 0,
+    "avg_pnl_per_trade": 0.0,
+    "net_pnl_usd": 0.0,
+    "drawdown_usd": 0.0
+  },
+  "thresholds": {
+    "min_runtime_hours": 72.0,
+    "max_engine_errors": 0,
+    "max_llm_to_gross_positive_pnl_pct": 10.0,
+    "min_closed_trades": 150,
+    "min_avg_pnl_per_trade": 0.0,
+    "max_daily_drawdown_usd": 25.0
+  },
+  "gates": {
+    "stability": false,
+    "cost_discipline": false,
+    "quality_sample_size": false,
+    "net_expectancy": false,
+    "drawdown_cap": true
+  }
+}

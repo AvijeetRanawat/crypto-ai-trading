@@ -7,6 +7,7 @@ import sqlite3
 import os
 import json
 from datetime import datetime
+from config import config
 
 app = FastAPI(title="Crypto AI Trading Dashboard")
 
@@ -18,10 +19,20 @@ app.add_middleware(
 )
 import time
 
-# ── Session start time — set once when this process boots ────────────────────
-SESSION_START = datetime.now().isoformat()
-SESSION_START_MS = int(time.time() * 1000)
 SESSION_ID = database.get_runtime_context()["session_id"]
+
+
+def _session_start_from_id(session_id: str) -> datetime:
+    try:
+        return datetime.strptime(session_id, "%Y%m%dT%H%M%S")
+    except Exception:
+        return datetime.now()
+
+
+# Anchor session timestamps to runtime session_id, not dashboard process boot time.
+_SESSION_START_DT = _session_start_from_id(SESSION_ID)
+SESSION_START = _SESSION_START_DT.isoformat()
+SESSION_START_MS = int(_SESSION_START_DT.timestamp() * 1000)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -30,6 +41,99 @@ def _db():
     conn = sqlite3.connect(database.DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _friendly_intent(raw_message: str) -> str:
+    m = (raw_message or "").strip()
+    l = m.lower()
+    if not m:
+        return "System started. Preparing data and waiting for first signal."
+    if "warming up" in l:
+        return "Collecting enough recent candles before making safe decisions."
+    if "waiting for live market data feed" in l or "feed stale" in l or "stale for" in l:
+        return "Waiting for fresh market prices from exchange feed."
+    if "choppy regime" in l:
+        return "Market is noisy/choppy now. System is skipping low-quality setups."
+    if "regime mismatch" in l:
+        return "Signal direction conflicts with market trend filter, so trade is skipped."
+    if "waiting for setup" in l:
+        return "No strong setup yet. Waiting for more indicator agreement."
+    if "edge_reject" in l or "edge reject" in l:
+        return "Potential trade does not clear fee/slippage edge threshold."
+    if "llm blocked" in l:
+        return "LLM call skipped due to budget/rate limits. Continuing deterministic checks."
+    if "holding " in l:
+        return "Managing an open trade and monitoring stop-loss / take-profit conditions."
+    if "trade #" in l or "🎯" in m:
+        return "Trade executed. Now monitoring risk exits and profit targets."
+    if "blocked" in l and "entry" in l:
+        return "Entry temporarily blocked by cooldown / duplicate protection."
+    if "kill-switch" in l or "trading halted" in l or "🛑" in m:
+        return "Risk guard triggered. Trading is paused for capital protection."
+    if "done." in l:
+        return "Session completed."
+    return m
+
+
+def _build_status_lines(raw_message: str) -> list:
+    lines = []
+    conn = _db()
+    cur = conn.cursor()
+
+    # Feed health
+    cur.execute("SELECT MAX(timestamp) FROM prices WHERE symbol='BTCUSDT'")
+    last_tick = (cur.fetchone() or [None])[0]
+    if last_tick:
+        try:
+            age = int((datetime.now() - datetime.fromisoformat(last_tick)).total_seconds())
+            if age <= max(15, config.PRICE_FEED_INTERVAL_SECONDS * 3):
+                lines.append(f"Price feed: live ({age}s ago)")
+            else:
+                lines.append(f"Price feed: stale ({age}s ago)")
+        except Exception:
+            lines.append("Price feed: unknown")
+    else:
+        lines.append("Price feed: no ticks yet")
+
+    # Warmup progress
+    min_ticks = max(1, int(config.DASHBOARD_WARMUP_MIN_TICKS))
+    cur.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM prices WHERE symbol='BTCUSDT' ORDER BY timestamp DESC LIMIT ?)",
+        (min_ticks,),
+    )
+    ticks = int((cur.fetchone() or [0])[0] or 0)
+    lines.append(f"Warmup: {ticks}/{min_ticks} bars")
+
+    # Position state
+    cur.execute(
+        "SELECT side, symbol, entry_time FROM trades WHERE status='OPEN' AND (session_id = ? OR session_id IS NULL) ORDER BY id DESC LIMIT 1",
+        (SESSION_ID,),
+    )
+    open_pos = cur.fetchone()
+    if open_pos:
+        lines.append(f"Position: {open_pos[0]} {open_pos[1]} (open)")
+    else:
+        lines.append("Position: none open")
+
+    # Last signal snapshot
+    cur.execute(
+        """
+        SELECT outcome, buy_votes, sell_votes, timestamp
+        FROM signal_events
+        WHERE (session_id = ? OR session_id IS NULL)
+        ORDER BY id DESC LIMIT 1
+        """,
+        (SESSION_ID,),
+    )
+    sig = cur.fetchone()
+    conn.close()
+    if sig:
+        lines.append(f"Last signal: {sig[0]} ({sig[1]} buy / {sig[2]} sell votes)")
+    else:
+        lines.append("Last signal: none yet")
+
+    # Keep short and scannable
+    return lines[:4]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,23 +151,49 @@ async def session_start():
 
 @app.get("/api/warmup")
 async def get_warmup():
-    """Return warmup progress: how many price ticks collected vs the 35 needed."""
-    MIN_TICKS = 35
+    """
+    Return warmup progress for UI.
+    Engine can already be ready via in-memory historical preload, so this endpoint
+    also checks current intent to avoid showing a stale 35-minute warmup illusion.
+    """
+    MIN_TICKS = max(1, int(config.DASHBOARD_WARMUP_MIN_TICKS))
     conn = _db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT COUNT(*) FROM prices WHERE symbol='BTCUSDT' AND timestamp >= ?",
-        (SESSION_START,)
+        "SELECT COUNT(*) FROM (SELECT 1 FROM prices WHERE symbol='BTCUSDT' ORDER BY timestamp DESC LIMIT ?)",
+        (MIN_TICKS,),
     )
     ticks = cur.fetchone()[0]
+    cur.execute(
+        "SELECT MAX(timestamp) FROM prices WHERE symbol='BTCUSDT'"
+    )
+    last_tick_ts = (cur.fetchone() or [None])[0]
+    cur.execute("SELECT message FROM intent WHERE id=1")
+    row = cur.fetchone()
+    intent_message = (row[0] if row else "") or ""
     conn.close()
-    done = ticks >= MIN_TICKS
+    engine_ready = "warming up" not in intent_message.lower()
+    done = ticks >= MIN_TICKS or engine_ready
+    shown_ticks = MIN_TICKS if done else min(ticks, MIN_TICKS)
+    seconds_remaining = 0 if done else max(0, (MIN_TICKS - ticks) * config.STRATEGY_BAR_INTERVAL_SECONDS)
+    # Prevent absurd countdowns; when feed is stale/missing show a clear stalled state instead.
+    stale = False
+    if last_tick_ts:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(last_tick_ts)).total_seconds()
+            stale = age > max(180, config.PRICE_FEED_INTERVAL_SECONDS * 3)
+        except Exception:
+            stale = False
+    if not done and (stale or ticks == 0):
+        seconds_remaining = min(seconds_remaining, 120)
+
     return {
-        "ticks": min(ticks, MIN_TICKS),
+        "ticks": shown_ticks,
         "min_ticks": MIN_TICKS,
-        "pct": min(100, round(ticks / MIN_TICKS * 100)),
+        "pct": min(100, round(shown_ticks / MIN_TICKS * 100)),
         "done": done,
-        "seconds_remaining": max(0, (MIN_TICKS - ticks) * 60),
+        "seconds_remaining": seconds_remaining,
+        "stalled": (not done and (stale or ticks == 0)),
     }
 
 
@@ -75,10 +205,9 @@ async def get_trades():
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
-        WHERE status='CLOSED' AND entry_time >= ?
-        AND (session_id = ? OR session_id IS NULL)
+        WHERE status='CLOSED' AND (session_id = ? OR session_id IS NULL)
         ORDER BY id DESC LIMIT 50
-    """, (SESSION_START, SESSION_ID))
+    """, (SESSION_ID,))
     rows = cur.fetchall()
     conn.close()
     return [
@@ -116,9 +245,8 @@ async def get_portfolio_summary():
     cur.execute("""
         SELECT id, symbol, side, price, quantity, entry_time, exit_time, reason, pnl, status
         FROM trades
-        WHERE status='CLOSED' AND entry_time >= ?
-        AND (session_id = ? OR session_id IS NULL)
-    """, (SESSION_START, SESSION_ID))
+        WHERE status='CLOSED' AND (session_id = ? OR session_id IS NULL)
+    """, (SESSION_ID,))
     closed = cur.fetchall()
 
     wins = [t for t in closed if (t[8] or 0) > 0]
@@ -208,15 +336,15 @@ async def get_portfolio_summary():
 
 @app.get("/api/market/history")
 async def get_market_history(symbol: str = "BTCUSDT"):
-    """Price chart — session only."""
+    """Price chart — always return the latest window for live updates."""
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
         SELECT timestamp, price FROM prices
-        WHERE symbol=? AND timestamp >= ?
-        ORDER BY timestamp ASC LIMIT 500
-    """, (symbol, SESSION_START))
-    rows = cur.fetchall()
+        WHERE symbol=?
+        ORDER BY timestamp DESC LIMIT 500
+    """, (symbol,))
+    rows = list(reversed(cur.fetchall()))
     conn.close()
     return [{"timestamp": r[0], "price": r[1]} for r in rows]
 
@@ -242,7 +370,13 @@ async def get_lessons():
 async def get_intent():
     intent = database.get_intent()
     if not intent:
-        return {"message": "Scanning markets...", "targets": []}
+        base = "Scanning markets..."
+        return {
+            "message": base,
+            "beginner_message": _friendly_intent(base),
+            "status_lines": _build_status_lines(base),
+            "targets": [],
+        }
     try:
         targets = json.loads(intent[3]) if intent[3] else []
     except Exception:
@@ -250,7 +384,14 @@ async def get_intent():
             targets = eval(intent[3]) if intent[3] else []
         except Exception:
             targets = []
-    return {"timestamp": intent[1], "message": intent[2], "targets": targets}
+    raw = intent[2] or "Scanning markets..."
+    return {
+        "timestamp": intent[1],
+        "message": raw,
+        "beginner_message": _friendly_intent(raw),
+        "status_lines": _build_status_lines(raw),
+        "targets": targets,
+    }
 
 
 @app.get("/api/logs")
@@ -286,6 +427,7 @@ async def get_signals_history(symbol: str = "BTCUSDT", limit: int = 200):
             "buy_votes": r[2], "sell_votes": r[3],
             "rsi": r[4], "macd": r[5], "bb_pct": r[6],
             "outcome": r[7], "claude_action": r[8], "claude_conf": r[9],
+            "max_voters": int(config.PRO_SIGNAL_VOTERS),
         }
         for r in reversed(rows)
     ]
@@ -389,4 +531,4 @@ if os.path.exists("static"):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

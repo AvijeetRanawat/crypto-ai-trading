@@ -140,8 +140,9 @@ class TradingEngine:
         self.allowed_symbols = set(config.BLUE_CHIP_WHITELIST)
         self.client.monitored_channels = list(self.allowed_symbols)
         
-        history_size = int((config.MOMENTUM_WINDOW_MINS * 60) / config.POLL_INTERVAL_SECONDS)
+        history_size = int((config.MOMENTUM_WINDOW_MINS * 60) / config.STRATEGY_BAR_INTERVAL_SECONDS)
         self.price_history = {symbol: deque(maxlen=history_size) for symbol in self.allowed_symbols}
+        self.last_bar_append = {}
         
         # Algorithmic tools
         self.algo_agents = [MomentumAgent(), SwingAgent()]
@@ -267,7 +268,8 @@ class TradingEngine:
     def _estimate_expected_edge_pct(self, buy_count: int, sell_count: int, tp_pct: float, sl_pct: float) -> float:
         agreement = max(buy_count, sell_count)
         disagreement = min(buy_count, sell_count)
-        quality = max(0.0, (agreement - disagreement) / 8.0)
+        voters = max(1, int(config.PRO_SIGNAL_VOTERS))
+        quality = max(0.0, (agreement - disagreement) / float(voters))
         expected_move_pct = (tp_pct * 100) * max(0.5, quality + 0.3)
         risk_drag_pct = (sl_pct * 100) * (1.0 - quality)
         return expected_move_pct - risk_drag_pct - config.FEE_SLIPPAGE_BUFFER_PCT
@@ -492,9 +494,16 @@ class TradingEngine:
                     if price > 0:
                         if symbol not in self.price_history:
                             self.price_history[symbol] = deque(
-                                maxlen=int((config.MOMENTUM_WINDOW_MINS * 60) / config.POLL_INTERVAL_SECONDS)
+                                maxlen=int((config.MOMENTUM_WINDOW_MINS * 60) / config.STRATEGY_BAR_INTERVAL_SECONDS)
                             )
-                        self.price_history[symbol].append(price)
+                        now_ts = datetime.now()
+                        last_append = self.last_bar_append.get(symbol)
+                        if (
+                            last_append is None
+                            or (now_ts - last_append).total_seconds() >= config.STRATEGY_BAR_INTERVAL_SECONDS
+                        ):
+                            self.price_history[symbol].append(price)
+                            self.last_bar_append[symbol] = now_ts
 
                 min_ticks = 35  # Enough for MACD (26 periods + 9 signal)
                 ticks_ready = len(self.price_history.get(primary_symbol, [])) if self.price_history else 0
@@ -504,6 +513,23 @@ class TradingEngine:
                     continue
 
                 prices = self.client.latest_prices
+                feed_ts = getattr(self.client, "last_feed_update", None)
+                feed_stale_secs = (datetime.now() - feed_ts).total_seconds() if feed_ts else None
+                if not prices or primary_symbol not in prices:
+                    self.skipped_cycles += 1
+                    if self.skipped_cycles % 2 == 1:
+                        update_intent("⚠️ Waiting for live market data feed (no fresh prices yet)...", [])
+                    await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
+                    continue
+                if feed_stale_secs is not None and feed_stale_secs > max(180, config.PRICE_FEED_INTERVAL_SECONDS * 3):
+                    self.skipped_cycles += 1
+                    if self.skipped_cycles % 2 == 1:
+                        update_intent(
+                            f"⚠️ Price feed stale for {int(feed_stale_secs)}s. Reconnecting/waiting for fresh ticks...",
+                            [primary_symbol],
+                        )
+                    await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
+                    continue
 
                 kill, reason = self._check_kill_switch()
                 if kill and not self.trading_halted_reason:

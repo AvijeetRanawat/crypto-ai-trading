@@ -149,7 +149,11 @@ async function updateWarmup() {
         wrap.style.display = 'flex';
         bar.style.width = d.pct + '%';
         const secs = d.seconds_remaining;
-        label.textContent = `Warming up… ${d.ticks}/${d.min_ticks} ticks · ~${secs}s remaining`;
+        if (d.stalled) {
+            label.textContent = `Waiting for live feed… ${d.ticks}/${d.min_ticks} ticks`;
+        } else {
+            label.textContent = `Warming up… ${d.ticks}/${d.min_ticks} ticks · ~${secs}s remaining`;
+        }
     } catch (e) { }
 }
 
@@ -189,10 +193,8 @@ async function checkFreshStart() {
                 perfChart.data.datasets[0].data = [];
                 perfChart.data.datasets[0].backgroundColor = [];
                 perfChart.update();
-                signalChart.data.labels = [];
-                signalChart.data.datasets[0].data = [];
-                signalChart.data.datasets[1].data = [];
-                signalChart.update();
+                buySeries.setData([]);
+                sellSeries.setData([]);
             }
             el('trades-list').innerHTML = '<div class="empty-state">New session — no trades yet</div>';
             el('lessons-log').innerHTML = '';
@@ -364,11 +366,11 @@ async function updateSignals() {
             el('macd-badge').textContent = `MACD ${latest.macd ?? '—'}`;
             el('bb-badge').textContent = `BB ${latest.bb_pct?.toFixed(0) ?? '—'}%`;
 
-            const totalVotes = 5;
+            const totalVotes = Math.max(1, Number(latest.max_voters || 8));
             el('buy-bar').style.width = ((latest.buy_votes / totalVotes) * 100) + '%';
             el('sell-bar').style.width = ((latest.sell_votes / totalVotes) * 100) + '%';
-            el('buy-count').textContent = `${latest.buy_votes}/5`;
-            el('sell-count').textContent = `${latest.sell_votes}/5`;
+            el('buy-count').textContent = `${latest.buy_votes}/${totalVotes}`;
+            el('sell-count').textContent = `${latest.sell_votes}/${totalVotes}`;
             el('rsi-val').textContent = latest.rsi?.toFixed(1) ?? '—';
             el('macd-val').textContent = latest.macd ?? '—';
             el('bb-val').textContent = latest.bb_pct?.toFixed(0) + '%' ?? '—';
@@ -466,8 +468,12 @@ async function updateIntent() {
         const res = await fetch(`${API}/intent`);
         const data = await res.json();
         const intentEl = el('intent-display');
-        if (data.message !== intentEl.textContent) {
-            intentEl.textContent = data.message;
+        const header = data.beginner_message || data.message || 'Scanning markets...';
+        const lines = Array.isArray(data.status_lines) ? data.status_lines : [];
+        const details = lines.length ? `\n${lines.map(s => `• ${s}`).join('\n')}` : '';
+        const rendered = `${header}${details}`;
+        if (rendered !== intentEl.textContent) {
+            intentEl.textContent = rendered;
             flashUpdate(intentEl);
         }
     } catch (e) { }
@@ -518,7 +524,7 @@ async function updateLogs() {
 // ── MASTER POLL ───────────────────────────────────────────────────────────────
 async function pollAll() {
     await checkFreshStart();
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
         updateWarmup(),
         updatePriceChart(),
         updatePortfolioSummary(),
@@ -526,6 +532,14 @@ async function pollAll() {
         updateSignals(),
         updateRegime(),
     ]);
+    const hasFailure = results.some(r => r.status === 'rejected');
+    if (hasFailure) {
+        const intentEl = el('intent-display');
+        if (intentEl && !intentEl.textContent.includes('disconnected')) {
+            intentEl.textContent = 'Dashboard disconnected from backend. Retrying...';
+            flashUpdate(intentEl);
+        }
+    }
 }
 
 async function pollSlow() {
